@@ -1297,6 +1297,12 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--tx);min-hei
 .alt a{color:var(--ac);text-decoration:none}
 .alt a:hover{text-decoration:underline}
 .err{background:rgba(220,38,38,.06);border:1px solid rgba(220,38,38,.15);color:var(--er);padding:7px 10px;font-size:.78rem;border-radius:2px;margin-bottom:14px}
+::selection{background:rgba(34,197,94,.2);color:var(--hi)}
+.a{animation:fadein .5s ease}
+@keyframes fadein{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.f input:focus{border-color:var(--ac);box-shadow:0 0 0 1px rgba(34,197,94,.15)}
+.btn:active{transform:scale(.98)}
+.ver{font-size:.6rem;color:#2a2a2a;text-align:center;margin-top:32px;letter-spacing:.08em}
 </style></head><body>
 <div class="a">
 <div class="br">Phantom</div>
@@ -1308,6 +1314,7 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--tx);min-hei
 <button class="btn" type="submit">{% if mode == 'register' %}create account{% else %}sign in{% endif %}</button>
 </form>
 <div class="alt">{% if mode == 'register' %}have an account? <a href="/login">sign in</a>{% else %}no account? <a href="/register">register</a>{% endif %}</div>
+<div class="ver">v1.0</div>
 </div>
 </body></html>"""
 
@@ -1327,10 +1334,13 @@ DASH_HTML = """<!DOCTYPE html>
   --card:#0a0a0a;
 }
 *{margin:0;padding:0;box-sizing:border-box;scrollbar-color:#222 transparent}
+::selection{background:rgba(34,197,94,.2);color:var(--hi)}
 ::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#222;border-radius:3px}::-webkit-scrollbar-thumb:hover{background:#333}
 body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--tx);min-height:100vh;-webkit-font-smoothing:antialiased}
-header{display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--bd);position:sticky;top:0;background:var(--bg);z-index:10}
-.brand{font-size:.82rem;font-weight:700;color:var(--hi);letter-spacing:.18em;text-transform:uppercase;text-decoration:none}
+header{display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--bd);position:sticky;top:0;background:var(--bg);z-index:10;backdrop-filter:blur(8px);background:rgba(6,6,6,.85)}
+.brand{font-size:.82rem;font-weight:700;color:var(--hi);letter-spacing:.18em;text-transform:uppercase;text-decoration:none;display:flex;align-items:center;gap:8px}
+.brand-dot{width:6px;height:6px;border-radius:50%;background:var(--dm);transition:all .4s}
+.brand-dot.on{background:var(--ac);box-shadow:0 0 8px rgba(34,197,94,.4)}
 .ub{display:flex;align-items:center;gap:12px;font-size:.74rem}
 .ub .nm{color:var(--tx);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ub a{color:var(--dm);text-decoration:none;transition:color .15s}
@@ -1349,7 +1359,8 @@ header{display:flex;align-items:center;justify-content:space-between;padding:14p
 .wrap{max-width:960px;margin:0 auto;padding:20px 16px 60px}
 
 .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:20px}
-.stat{background:var(--card);border:1px solid var(--bd);border-radius:3px;padding:12px 14px}
+.stat{background:var(--card);border:1px solid var(--bd);border-radius:3px;padding:12px 14px;transition:border-color .2s}
+.stat:hover{border-color:#252525}
 .stat .sv{font-size:1.4rem;font-weight:700;color:var(--hi);font-variant-numeric:tabular-nums;line-height:1}
 .stat .sl2{font-size:.64rem;letter-spacing:.08em;text-transform:uppercase;color:var(--dm);margin-top:5px}
 
@@ -1360,7 +1371,7 @@ header{display:flex;align-items:center;justify-content:space-between;padding:14p
 .cid-row .cid-tag{font-size:.64rem;color:var(--dm);white-space:nowrap;padding-bottom:10px}
 
 input,textarea,select{width:100%;padding:8px 10px;font-size:.84rem;font-family:inherit;background:var(--ib);border:1px solid var(--bd);border-radius:2px;color:var(--hi);outline:none;transition:border-color .15s}
-input:focus,textarea:focus,select:focus{border-color:#2a2a2a}
+input:focus,textarea:focus,select:focus{border-color:#2a2a2a;box-shadow:0 0 0 1px rgba(34,197,94,.1)}
 input:disabled{opacity:.4}
 textarea{resize:vertical;min-height:72px;font-family:'Courier New',Consolas,monospace;font-size:.8rem;line-height:1.5}
 select{cursor:pointer;-webkit-appearance:none;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23555'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center}
@@ -1368,6 +1379,7 @@ select{cursor:pointer;-webkit-appearance:none;appearance:none;background-image:u
 .row>div{flex:1}
 .btn{width:100%;padding:10px;font-size:.84rem;font-weight:600;font-family:inherit;background:var(--ac);color:#000;border:none;border-radius:2px;cursor:pointer;transition:opacity .15s;letter-spacing:.02em}
 .btn:hover{opacity:.85}
+.btn:active{transform:scale(.98)}
 .btn:disabled{opacity:.35;cursor:not-allowed}
 .btn-sm{padding:8px 14px;font-size:.76rem;width:auto}
 .btn-ghost{background:transparent;color:var(--tx);border:1px solid var(--bd)}
@@ -1390,7 +1402,7 @@ select{cursor:pointer;-webkit-appearance:none;appearance:none;background-image:u
 .dial-pad{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;width:100%;margin:8px 0}
 .dp-btn{background:var(--sf);border:1px solid var(--bd);border-radius:6px;color:var(--hi);font-size:1.1rem;font-weight:600;padding:14px 0;cursor:pointer;transition:background .1s;display:flex;flex-direction:column;align-items:center;line-height:1.1}
 .dp-btn:hover{background:#191919;border-color:#252525}
-.dp-btn:active{background:#1a1a1a;transform:scale(.98)}
+.dp-btn:active{background:#1a1a1a;transform:scale(.96)}
 .dp-sub{font-size:.5rem;font-weight:400;text-transform:uppercase;letter-spacing:.1em;opacity:.45;margin-top:2px}
 .dlr-actions{display:flex;gap:8px;width:100%;margin-top:8px}
 .dlr-call{flex:3}
@@ -1510,7 +1522,8 @@ select{cursor:pointer;-webkit-appearance:none;appearance:none;background-image:u
 .p1-overlay{display:none}
 hr.dv{border:none;border-top:1px solid var(--bd);margin:16px 0}
 
-.view{display:none}.view.active{display:block}
+.view{display:none}.view.active{display:block;animation:vfade .25s ease}
+@keyframes vfade{from{opacity:0}to{opacity:1}}
 .back{background:none;border:none;color:var(--dm);font-size:.78rem;font-family:inherit;cursor:pointer;padding:0;margin-bottom:16px;display:flex;align-items:center;gap:5px;transition:color .15s}
 .back:hover{color:var(--tx)}
 .stt{font-size:.88rem;font-weight:600;color:var(--hi);letter-spacing:.04em;margin-bottom:20px}
@@ -1537,6 +1550,7 @@ hr.dv{border:none;border-top:1px solid var(--bd);margin:16px 0}
 .empty{color:var(--dm);font-size:.78rem;padding:8px 0}
 .redial{background:none;border:none;cursor:pointer;padding:2px;color:var(--dm);transition:color .15s;display:flex;align-items:center}
 .redial:hover{color:var(--ac)}
+.footer{text-align:center;padding:24px 0 16px;font-size:.58rem;color:var(--dm);letter-spacing:.12em;text-transform:uppercase}
 @media(max-width:480px){.row{flex-direction:column;gap:6px}.stats{grid-template-columns:1fr 1fr}}
 .bridge-toast{position:fixed;top:20px;right:20px;z-index:9999;width:320px;background:var(--card);border:1px solid var(--bd);border-left:3px solid var(--ac);border-radius:8px;padding:0;font-family:'Inter',sans-serif;animation:bslide .3s ease;overflow:hidden}
 @keyframes bslide{from{opacity:0;transform:translateX(40px)}to{opacity:1;transform:translateX(0)}}
@@ -1559,7 +1573,7 @@ hr.dv{border:none;border-top:1px solid var(--bd);margin:16px 0}
 .bridge-toast .bt-answer:hover{filter:brightness(1.15);color:#000}
 </style></head><body>
 <header>
-<a href="/" class="brand">Phantom</a>
+<a href="/" class="brand"><span class="brand-dot" id="brand-dot"></span>Phantom</a>
 <div class="ub"><span class="nm">{{ uname }}</span><a href="/logout">sign out</a><button class="gear" onclick="showSettings()" title="settings"><svg viewBox="0 0 24 24" fill="none" stroke="#444" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button></div>
 </header>
 
@@ -1847,6 +1861,7 @@ hr.dv{border:none;border-top:1px solid var(--bd);margin:16px 0}
 
 </div>
 
+<div class="footer">phantom v1.0</div>
 
 <script>
 const $=id=>document.getElementById(id);
@@ -1928,7 +1943,7 @@ loadDevices();
 
 /* connection test */
 function setConn(state,txt){
-['sbar-dot','conn-dot'].forEach(id=>{const e=$(id);if(e){e.className=id==='sbar-dot'?'dot':'conn-dot';if(state==='on')e.classList.add('on');if(state==='fail')e.classList.add('fail')}});
+['sbar-dot','conn-dot','brand-dot'].forEach(id=>{const e=$(id);if(e){e.className=id==='sbar-dot'?'dot':id==='brand-dot'?'brand-dot':'conn-dot';if(state==='on')e.classList.add('on');if(state==='fail')e.classList.add('fail')}});
 ['sbar-txt','conn-txt'].forEach(id=>{const e=$(id);if(e){e.textContent=txt;e.className=id==='sbar-txt'?'stxt':'conn-txt';if(state==='on')e.classList.add('on');if(state==='fail')e.classList.add('fail')}});
 }
 function testConn(){
