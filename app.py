@@ -689,7 +689,7 @@ def run_direct_calls(numbers, cfg, message, voice, pause, trigger_digit,
         hold_ulaw = None
         if hold_play == "music":
             push_event("p1_status", {"msg": "loading hold music..."})
-            for hf in ["hold_music.mp3", "hold_music.wav"]:
+            for hf in ["assets/hold_music.mp3", "assets/hold_music.wav", "hold_music.mp3", "hold_music.wav"]:
                 hp = Path(hf)
                 if hp.exists():
                     hold_ulaw = mp3_to_ulaw(hp)
