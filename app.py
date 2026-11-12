@@ -871,6 +871,7 @@ ad_stop_event = threading.Event()
 ad_next_event = threading.Event()
 ad_soundboard_q = queue.Queue()
 ad_batch_state = {"running": False, "rows": [], "status_msg": "ready", "current_idx": -1}
+ad_active_sip = [None]
 ad_ws_clients = []
 ad_ws_lock = threading.Lock()
 
@@ -1045,6 +1046,7 @@ def run_auto_dial_calls(numbers, cfg, max_duration, user_id=None):
                             r["status"] = "answered"
                             break
 
+                    ad_active_sip[0] = sip
                     digits = []
                     disconnect_evt = threading.Event()
                     screening_flag = [False]
@@ -1101,6 +1103,7 @@ def run_auto_dial_calls(numbers, cfg, max_duration, user_id=None):
                             timestamp += FRAME_SIZE
                             time.sleep(0.02)
 
+                    ad_active_sip[0] = None
                     dtmf_stop.set()
                     dtmf_thread.join(timeout=1)
                     try:
@@ -1162,6 +1165,7 @@ def run_auto_dial_calls(numbers, cfg, max_duration, user_id=None):
         push_event("ad_status", {"msg": f"error: {str(e)[:40]}"})
         push_event("ad_done", {"n": len(numbers), "error": str(e)})
     finally:
+        ad_active_sip[0] = None
         ad_batch_state["running"] = False
         ad_batch_state["current_idx"] = -1
 
@@ -1495,6 +1499,20 @@ def api_auto_stop():
 def api_auto_next():
     ad_next_event.set()
     return jsonify(ok=True)
+
+
+@app.route("/api/auto-dtmf", methods=["POST"])
+@login_required
+def api_auto_dtmf():
+    d = request.json or {}
+    digit = d.get("digit", "")
+    if digit not in "0123456789*#":
+        return jsonify(error="bad digit"), 400
+    sip = ad_active_sip[0]
+    if sip and sip.connected:
+        sip.send_dtmf(digit)
+        return jsonify(ok=True)
+    return jsonify(error="no active call"), 409
 
 
 @app.route("/api/auto-state")
@@ -1958,6 +1976,18 @@ hr.dv{border:none;border-top:1px solid var(--bd);margin:16px 0}
 .sb-ico{display:block;font-size:1.1rem;margin-bottom:2px}
 .sb-name{font-size:.58rem;color:var(--dm);text-transform:uppercase;letter-spacing:.04em}
 .sb-tts{margin-top:8px;padding-top:8px;border-top:1px solid var(--bd)}
+.ad-dtmf-sec{margin-top:10px;padding-top:10px;border-top:1px solid var(--bd)}
+.ad-dtmf-head{font-size:.6rem;font-weight:600;color:var(--dm);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
+.ad-dtmf-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:4px}
+.ad-dtmf-btn{background:var(--sf);border:1px solid var(--bd);border-radius:5px;color:var(--hi);font-size:.9rem;font-weight:600;padding:8px 0;cursor:pointer;transition:all .1s;text-align:center;font-family:inherit}
+.ad-dtmf-btn:hover{background:#191919;border-color:#333}
+.ad-dtmf-btn:active{transform:scale(.94);background:#1a1a1a}
+.ad-dtmf-btn.sent{border-color:var(--ac);box-shadow:0 0 6px rgba(34,197,94,.25)}
+.ad-mute-wrap{margin-top:8px;display:flex;gap:6px}
+.ad-mute-btn{flex:1;padding:8px 0;border-radius:6px;font-size:.68rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;cursor:pointer;transition:all .15s;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:6px}
+.ad-mute-btn.unmuted{background:var(--sf);border:1px solid var(--bd);color:var(--hi)}
+.ad-mute-btn.unmuted:hover{border-color:#333;background:#191919}
+.ad-mute-btn.muted{background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.4);color:#ef4444}
 .footer{text-align:center;padding:24px 0 16px;font-size:.58rem;color:var(--dm);letter-spacing:.12em;text-transform:uppercase}
 @media(max-width:480px){.row{flex-direction:column;gap:6px}.stats{grid-template-columns:1fr 1fr}}
 .bridge-toast{position:fixed;top:20px;right:20px;z-index:9999;width:320px;background:var(--card);border:1px solid var(--bd);border-left:3px solid var(--ac);border-radius:8px;padding:0;font-family:'Inter',sans-serif;animation:bslide .3s ease;overflow:hidden}
@@ -2278,6 +2308,31 @@ hr.dv{border:none;border-top:1px solid var(--bd);margin:16px 0}
 </div>
 </div>
 
+<div class="ad-dtmf-sec">
+<div class="ad-dtmf-head">dtmf keypad</div>
+<div class="ad-dtmf-grid">
+<button class="ad-dtmf-btn" onclick="adDTMF('1',this)">1</button>
+<button class="ad-dtmf-btn" onclick="adDTMF('2',this)">2</button>
+<button class="ad-dtmf-btn" onclick="adDTMF('3',this)">3</button>
+<button class="ad-dtmf-btn" onclick="adDTMF('4',this)">4</button>
+<button class="ad-dtmf-btn" onclick="adDTMF('5',this)">5</button>
+<button class="ad-dtmf-btn" onclick="adDTMF('6',this)">6</button>
+<button class="ad-dtmf-btn" onclick="adDTMF('7',this)">7</button>
+<button class="ad-dtmf-btn" onclick="adDTMF('8',this)">8</button>
+<button class="ad-dtmf-btn" onclick="adDTMF('9',this)">9</button>
+<button class="ad-dtmf-btn" onclick="adDTMF('*',this)">*</button>
+<button class="ad-dtmf-btn" onclick="adDTMF('0',this)">0</button>
+<button class="ad-dtmf-btn" onclick="adDTMF('#',this)">#</button>
+</div>
+</div>
+
+<div class="ad-mute-wrap">
+<button class="ad-mute-btn unmuted" id="ad-mute-big" onclick="toggleADMute()">
+<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/></svg>
+<span id="ad-mute-label">listening</span>
+</button>
+</div>
+
 <div class="p1-actions">
 <button class="btn btn-start" id="ad-start" onclick="startAD()"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-1px;margin-right:4px"><polygon points="5 3 19 12 5 21"/></svg>start</button>
 <button class="btn btn-ghost" id="ad-next" onclick="nextAD()" disabled>next &#8594;</button>
@@ -2315,7 +2370,6 @@ hr.dv{border:none;border-top:1px solid var(--bd);margin:16px 0}
 <div class="p1-monitor" id="ad-monitor">
 <svg class="mon-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
 <span class="mon-label">live audio monitor</span>
-<button class="mon-mute" id="ad-mute" onclick="toggleADMute()">mute</button>
 </div>
 
 <div class="p1-live-head"><span class="p1-live-title">live call status</span></div>
@@ -3133,7 +3187,17 @@ if(adAudioWs){try{adAudioWs.close()}catch(e){}adAudioWs=null}
 }
 
 function toggleADMute(){
-adMuted=!adMuted;$('ad-mute').textContent=adMuted?'unmute':'mute';
+adMuted=!adMuted;
+const btn=$('ad-mute-big');
+if(adMuted){btn.className='ad-mute-btn muted';$('ad-mute-label').textContent='muted'}
+else{btn.className='ad-mute-btn unmuted';$('ad-mute-label').textContent='listening'}
+}
+
+function adDTMF(digit,btn){
+fetch('/api/auto-dtmf',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({digit})})
+.then(r=>r.json()).then(d=>{
+if(d.ok){btn.classList.add('sent');setTimeout(()=>btn.classList.remove('sent'),300)}
+}).catch(()=>{});
 }
 
 sse.addEventListener('ad_status',e=>{
