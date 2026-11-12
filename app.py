@@ -8,7 +8,6 @@ import os
 import queue
 import random
 import socket
-import sqlite3
 import struct
 import sys
 import threading
@@ -38,39 +37,93 @@ sock = Sock(app)
 
 # ── database ──────────────────────────────────────────────────
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "phantom.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+_USE_PG = bool(DATABASE_URL)
 
+def _q(sql):
+    """Swap ? placeholders to %s for Postgres."""
+    return sql.replace("?", "%s") if _USE_PG else sql
 
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+if DATABASE_URL:
+    import psycopg2
+    import psycopg2.extras
+    import psycopg2.pool
+    _pg_pool = psycopg2.pool.ThreadedConnectionPool(1, 10, DATABASE_URL)
 
+    class _PgConn:
+        def __init__(self):
+            self._conn = _pg_pool.getconn()
+            self._conn.autocommit = False
+        def execute(self, sql, params=None):
+            cur = self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute(sql, params)
+            return cur
+        def commit(self):
+            self._conn.commit()
+        def close(self):
+            _pg_pool.putconn(self._conn)
 
-def init_db():
-    c = get_db()
-    c.execute("""CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE NOT NULL COLLATE NOCASE,
-        pw_hash TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS user_settings (
-        user_id INTEGER PRIMARY KEY REFERENCES users(id),
-        data TEXT NOT NULL DEFAULT '{}'
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS call_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL REFERENCES users(id),
-        number TEXT NOT NULL,
-        direction TEXT NOT NULL DEFAULT 'outbound',
-        status TEXT NOT NULL DEFAULT 'unknown',
-        duration INTEGER DEFAULT 0,
-        source TEXT NOT NULL DEFAULT 'dialer',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )""")
-    c.commit()
-    c.close()
+    def get_db():
+        return _PgConn()
+
+    def init_db():
+        c = get_db()
+        c.execute("""CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            pw_hash TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS user_settings (
+            user_id INTEGER PRIMARY KEY REFERENCES users(id),
+            data TEXT NOT NULL DEFAULT '{}'
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS call_history (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            number TEXT NOT NULL,
+            direction TEXT NOT NULL DEFAULT 'outbound',
+            status TEXT NOT NULL DEFAULT 'unknown',
+            duration INTEGER DEFAULT 0,
+            source TEXT NOT NULL DEFAULT 'dialer',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""")
+        c.commit()
+        c.close()
+
+else:
+    import sqlite3
+    DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "phantom.db")
+
+    def get_db():
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def init_db():
+        c = get_db()
+        c.execute("""CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL COLLATE NOCASE,
+            pw_hash TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS user_settings (
+            user_id INTEGER PRIMARY KEY REFERENCES users(id),
+            data TEXT NOT NULL DEFAULT '{}'
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS call_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            number TEXT NOT NULL,
+            direction TEXT NOT NULL DEFAULT 'outbound',
+            status TEXT NOT NULL DEFAULT 'unknown',
+            duration INTEGER DEFAULT 0,
+            source TEXT NOT NULL DEFAULT 'dialer',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""")
+        c.commit()
+        c.close()
 
 
 init_db()
@@ -420,8 +473,8 @@ class LiveCall:
         try:
             c = get_db()
             c.execute(
-                "INSERT INTO call_history(user_id, number, status, duration, source) "
-                "VALUES(?,?,?,?,?)",
+                _q("INSERT INTO call_history(user_id, number, status, duration, source) "
+                "VALUES(?,?,?,?,?)"),
                 (self.user_id, self.number, status, duration, "dialer"),
             )
             c.commit()
@@ -644,8 +697,8 @@ def run_calls(numbers, cfg, message, response_msg, voice, pause, user_id=None):
                 try:
                     c = get_db()
                     c.execute(
-                        "INSERT INTO call_history(user_id, number, status, source) "
-                        "VALUES(?,?,?,?)",
+                        _q("INSERT INTO call_history(user_id, number, status, source) "
+                        "VALUES(?,?,?,?)"),
                         (user_id, num, entry["status"], "p1bot"),
                     )
                     c.commit()
@@ -787,8 +840,8 @@ def run_direct_calls(numbers, cfg, message, voice, pause, trigger_digit,
                 try:
                     c = get_db()
                     c.execute(
-                        "INSERT INTO call_history(user_id, number, status, source) "
-                        "VALUES(?,?,?,?)",
+                        _q("INSERT INTO call_history(user_id, number, status, source) "
+                        "VALUES(?,?,?,?)"),
                         (user_id, num, entry["status"], "p1bot"),
                     )
                     c.commit()
@@ -839,7 +892,7 @@ def login():
         p = request.form.get("password", "")
         c = get_db()
         row = c.execute(
-            "SELECT * FROM users WHERE username=?", (u,)
+            _q("SELECT * FROM users WHERE username=?"), (u,)
         ).fetchone()
         c.close()
         if row and check_password_hash(row["pw_hash"], p):
@@ -871,18 +924,18 @@ def register():
             c = get_db()
             try:
                 c.execute(
-                    "INSERT INTO users(username, pw_hash) VALUES(?,?)",
+                    _q("INSERT INTO users(username, pw_hash) VALUES(?,?)"),
                     (u, generate_password_hash(p)),
                 )
                 c.commit()
                 row = c.execute(
-                    "SELECT * FROM users WHERE username=?", (u,)
+                    _q("SELECT * FROM users WHERE username=?"), (u,)
                 ).fetchone()
                 session["uid"] = row["id"]
                 session["uname"] = row["username"]
                 c.close()
                 return redirect("/")
-            except sqlite3.IntegrityError:
+            except Exception as _e:
                 c.close()
                 err = "username taken"
     return render_template_string(AUTH_HTML, error=err, mode="register")
@@ -979,7 +1032,7 @@ def api_call():
 def api_get_settings():
     c = get_db()
     row = c.execute(
-        "SELECT data FROM user_settings WHERE user_id=?", (session["uid"],)
+        _q("SELECT data FROM user_settings WHERE user_id=?"), (session["uid"],)
     ).fetchone()
     c.close()
     return jsonify(json.loads(row["data"]) if row else {})
@@ -991,8 +1044,8 @@ def api_save_settings():
     d = request.json or {}
     c = get_db()
     c.execute(
-        "INSERT INTO user_settings(user_id, data) VALUES(?,?) "
-        "ON CONFLICT(user_id) DO UPDATE SET data=excluded.data",
+        _q("INSERT INTO user_settings(user_id, data) VALUES(?,?) "
+        "ON CONFLICT(user_id) DO UPDATE SET data=excluded.data"),
         (session["uid"], json.dumps(d)),
     )
     c.commit()
@@ -1038,12 +1091,18 @@ def api_sip_status():
 def api_history():
     c = get_db()
     rows = c.execute(
-        "SELECT number, direction, status, source, created_at "
-        "FROM call_history WHERE user_id=? ORDER BY id DESC LIMIT 50",
+        _q("SELECT number, direction, status, source, created_at "
+        "FROM call_history WHERE user_id=? ORDER BY id DESC LIMIT 50"),
         (session["uid"],),
     ).fetchall()
     c.close()
-    return jsonify([dict(r) for r in rows])
+    out = []
+    for r in rows:
+        d = dict(r)
+        if d.get("created_at") and hasattr(d["created_at"], "isoformat"):
+            d["created_at"] = d["created_at"].isoformat()
+        out.append(d)
+    return jsonify(out)
 
 
 @app.route("/api/log")
