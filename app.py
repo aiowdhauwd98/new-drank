@@ -447,6 +447,7 @@ agent_ws_client = None
 agent_ws_lock = threading.Lock()
 agent_mic_q = queue.Queue()
 agent_clocked_in = False
+agent_answer_event = threading.Event()
 
 
 def _linear_to_ulaw(sample):
@@ -711,6 +712,7 @@ def run_direct_calls(numbers, cfg, message, voice, pause, trigger_digit,
         push_event("p1_status", {"msg": f"starting — {len(numbers)} numbers, agent clocked in"})
 
         for i, num in enumerate(numbers):
+            agent_answer_event.clear()
             if p1_stop_event.is_set():
                 push_event("batch_done", {"n": len(numbers), "stopped": True})
                 return
@@ -740,6 +742,7 @@ def run_direct_calls(numbers, cfg, message, voice, pause, trigger_digit,
                 retry_delay=cfg.get("retry_delay", 3),
                 stop_event=p1_stop_event,
                 bridge_cb=_notify_agent_bridge,
+                answer_event=agent_answer_event,
             )
 
             if result == "bridged":
@@ -1158,6 +1161,15 @@ def agent_audio_ws(ws):
             data = ws.receive()
             if data is None:
                 break
+            if isinstance(data, str):
+                try:
+                    import json as _json
+                    msg = _json.loads(data)
+                    if msg.get("type") == "answer":
+                        agent_answer_event.set()
+                except Exception:
+                    pass
+                continue
             if isinstance(data, bytes):
                 agent_mic_q.put(data)
     except Exception:
@@ -1484,6 +1496,8 @@ hr.dv{border:none;border-top:1px solid var(--bd);margin:16px 0}
 .bridge-toast .bt-footer{display:flex;justify-content:flex-end;padding:8px 16px;border-top:1px solid var(--bd)}
 .bridge-toast .bt-btn{background:none;border:1px solid var(--bd);color:var(--tx);padding:5px 14px;border-radius:5px;font-size:.72rem;cursor:pointer;font-family:'Inter',sans-serif;transition:all .15s}
 .bridge-toast .bt-btn:hover{border-color:var(--ac);color:var(--ac)}
+.bridge-toast .bt-answer{background:var(--ac);color:#000;border-color:var(--ac);font-weight:600}
+.bridge-toast .bt-answer:hover{filter:brightness(1.15);color:#000}
 </style></head><body>
 <header>
 <a href="/" class="brand">Phantom</a>
@@ -2298,9 +2312,18 @@ el.innerHTML=`<div class="bt-bar"></div>
 <span class="bt-k">status</span><span class="bt-v" style="color:var(--ac)">bridging</span>
 </div>
 </div>
-<div class="bt-footer"><button class="bt-btn" onclick="this.closest('.bridge-toast').remove()">dismiss</button></div>`;
+<div class="bt-footer"><button class="bt-btn bt-answer" onclick="agentAnswer(this)">answer</button><button class="bt-btn" onclick="this.closest('.bridge-toast').remove()">dismiss</button></div>`;
 document.body.appendChild(el);
-setTimeout(()=>{if(el.parentNode){el.style.transition='opacity .3s';el.style.opacity='0';setTimeout(()=>el.remove(),300)}},20000);
+}
+function agentAnswer(btn){
+if(!agentWs||agentWs.readyState!==1){alert('not clocked in');return}
+agentWs.send(JSON.stringify({type:'answer'}));
+const toast=btn.closest('.bridge-toast');
+const st=toast.querySelector('.bt-v[style]');if(st){st.textContent='connected';st.style.color='var(--ac)'}
+btn.textContent='connected';btn.disabled=true;btn.style.opacity='.5';
+toast.querySelector('.bt-bar').style.background='var(--ac)';
+toast.querySelector('.bt-bar').style.animation='none';
+setTimeout(()=>{if(toast.parentNode){toast.style.transition='opacity .3s';toast.style.opacity='0';setTimeout(()=>toast.remove(),300)}},5000);
 }
 function clockOut(){
 if(agentMicProc){agentMicProc.disconnect();agentMicProc=null}

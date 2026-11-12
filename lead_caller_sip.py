@@ -1107,7 +1107,8 @@ def do_direct_call(server, port, username, password, caller_id, number,
                    audio_out_cb=None, audio_in_q=None,
                    audio_monitor_cb=None, audio_cb=None,
                    retries=3, retry_delay=3, stop_event=None,
-                   audio_out_monitor_cb=None, bridge_cb=None):
+                   audio_out_monitor_cb=None, bridge_cb=None,
+                   answer_event=None):
     """Call target, play TTS, wait for DTMF routing, then bridge or hangup.
     Returns 'bridged', 'answered', 'hangup', 'disconnected', 'screening',
     'busy', 'declined', 'unavailable', 'cancelled', or False."""
@@ -1192,21 +1193,27 @@ def do_direct_call(server, port, username, password, caller_id, number,
 
                     if hold_ulaw and rtp_state:
                         seq_h, ts_h, ssrc_h = rtp_state
-                        off = 0
-                        while off < len(hold_ulaw):
-                            if stop_event and stop_event.is_set():
-                                break
-                            chunk = hold_ulaw[off:off + FRAME_SIZE]
-                            if len(chunk) < FRAME_SIZE:
-                                chunk += bytes([0xFF] * (FRAME_SIZE - len(chunk)))
-                            pkt = build_rtp_packet(chunk, seq_h, ts_h, ssrc_h, 0)
-                            rtp_sock.sendto(pkt, remote_rtp)
-                            seq_h = (seq_h + 1) & 0xFFFF
-                            ts_h += FRAME_SIZE
-                            off += FRAME_SIZE
-                            time.sleep(0.02)
-                            if not audio_in_q.empty():
-                                break
+                        answered = False
+                        while not answered:
+                            off = 0
+                            while off < len(hold_ulaw):
+                                if stop_event and stop_event.is_set():
+                                    answered = True
+                                    break
+                                if answer_event and answer_event.is_set():
+                                    answered = True
+                                    break
+                                chunk = hold_ulaw[off:off + FRAME_SIZE]
+                                if len(chunk) < FRAME_SIZE:
+                                    chunk += bytes([0xFF] * (FRAME_SIZE - len(chunk)))
+                                pkt = build_rtp_packet(chunk, seq_h, ts_h, ssrc_h, 0)
+                                rtp_sock.sendto(pkt, remote_rtp)
+                                seq_h = (seq_h + 1) & 0xFFFF
+                                ts_h += FRAME_SIZE
+                                off += FRAME_SIZE
+                                time.sleep(0.02)
+                            if not answered and not (answer_event and answer_event.is_set()):
+                                continue
 
                     while not audio_in_q.empty():
                         audio_in_q.get_nowait()
