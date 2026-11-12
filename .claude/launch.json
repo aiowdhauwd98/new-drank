@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "finance-dashboard",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "finance-dashboard", "--", "--port", "5173", "--strictPort"],
+      "port": 5173
+    },
+    {
+      "name": "verify-page-dev",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["roblox-verify-bot/tools/dev_server.py"],
+      "port": 8080
+    }
+    ,{
+      "name": "phantom",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["app.py"],
+      "port": 5000
+    }
+  ]
+}

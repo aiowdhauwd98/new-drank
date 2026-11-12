@@ -1,0 +1,4 @@
+flask>=3.0
+flask-sock>=0.7
+edge-tts>=6.1
+miniaudio>=1.59
