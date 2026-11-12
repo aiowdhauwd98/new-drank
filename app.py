@@ -915,38 +915,56 @@ def _gen_sweep(f_start, f_end, duration, amplitude=4000):
 
 def _build_soundboard():
     sb = {}
-    sb["airhorn"] = (
-        _gen_tone([440, 554, 659], 0.15, 6000)
-        + _gen_tone([466, 587, 698], 0.15, 6000)
-        + _gen_tone([440, 554, 659], 0.12, 6500)
-        + _gen_tone([466, 587, 698], 0.12, 6500)
-        + _gen_tone([440, 554, 659, 880], 0.8, 7000)
+    sb["hold_music"] = b""
+    melody = [(392, 0.25), (440, 0.25), (494, 0.25), (523, 0.5),
+              (494, 0.25), (440, 0.25), (392, 0.5),
+              (349, 0.25), (392, 0.25), (440, 0.5), (392, 0.25), (349, 0.25), (330, 0.5)]
+    for freq, dur in melody:
+        sb["hold_music"] += _gen_tone([freq], dur, 2500)
+    sb["hold_music"] += bytes([0xFF] * 4000)
+    for freq, dur in melody:
+        sb["hold_music"] += _gen_tone([freq], dur, 2500)
+
+    sb["ivr_menu"] = (
+        _gen_tone([440], 0.08, 3000) + bytes([0xFF] * 400)
+        + _gen_tone([440], 0.08, 3000) + bytes([0xFF] * 2400)
     )
-    sb["sad_trombone"] = (
-        _gen_tone([293], 0.35, 5000)
-        + _gen_tone([277], 0.35, 5000)
-        + _gen_tone([261], 0.35, 5000)
-        + _gen_tone([247], 0.7, 4500)
+
+    sb["transfer"] = (
+        _gen_tone([440], 0.15, 3500) + bytes([0xFF] * 800)
+        + _gen_tone([480], 0.15, 3500) + bytes([0xFF] * 800)
+        + _gen_tone([520], 0.15, 3500) + bytes([0xFF] * 800)
+        + _gen_tone([580], 0.3, 3500)
     )
-    sb["rimshot"] = (
-        _gen_tone([800, 1200], 0.04, 6000)
-        + bytes([0xFF] * 400)
-        + _gen_tone([600, 1000], 0.04, 6000)
-        + bytes([0xFF] * 400)
-        + _gen_tone([200, 400, 800, 1600], 0.15, 7000)
+
+    sb["typing"] = b""
+    import random as _r
+    for _ in range(18):
+        f = _r.randint(1800, 3200)
+        sb["typing"] += _gen_tone([f], 0.02, 2000) + bytes([0xFF] * _r.randint(200, 600))
+
+    sb["confirm"] = (
+        _gen_tone([523], 0.12, 3500) + bytes([0xFF] * 200)
+        + _gen_tone([659], 0.12, 3500) + bytes([0xFF] * 200)
+        + _gen_tone([784], 0.25, 4000)
     )
-    sb["crickets"] = b""
-    for _ in range(6):
-        sb["crickets"] += _gen_tone([4000, 4500], 0.06, 2000) + bytes([0xFF] * 640)
-    sb["fart"] = _gen_sweep(120, 60, 0.6, 5500) + _gen_sweep(80, 40, 0.3, 3000)
-    sb["beep"] = _gen_tone([1000], 0.3, 4000)
-    sb["dial_tone"] = _gen_tone([350, 440], 1.5, 3500)
-    sb["busy"] = b""
-    for _ in range(4):
-        sb["busy"] += _gen_tone([480, 620], 0.5, 3500) + bytes([0xFF] * 4000)
-    sb["siren"] = b""
+
+    sb["error_tone"] = (
+        _gen_tone([480, 620], 0.25, 3500) + bytes([0xFF] * 1600)
+        + _gen_tone([480, 620], 0.25, 3500) + bytes([0xFF] * 1600)
+        + _gen_tone([480, 620], 0.25, 3500)
+    )
+
+    sb["hold_beep"] = (
+        _gen_tone([1000], 0.08, 2500) + bytes([0xFF] * 8000)
+        + _gen_tone([1000], 0.08, 2500)
+    )
+
+    sb["ring_back"] = b""
     for _ in range(3):
-        sb["siren"] += _gen_sweep(600, 1400, 0.4, 5000) + _gen_sweep(1400, 600, 0.4, 5000)
+        sb["ring_back"] += _gen_tone([440, 480], 2.0, 3000) + bytes([0xFF] * 32000)
+
+    sb["dial_tone"] = _gen_tone([350, 440], 2.0, 3500)
     return sb
 
 
@@ -2289,15 +2307,15 @@ hr.dv{border:none;border-top:1px solid var(--bd);margin:16px 0}
 <div class="p1-sec">
 <div class="p1-secn"><span class="n">3</span><span class="t">soundboard</span></div>
 <div class="sb-grid" id="sb-grid">
-<button class="sb-btn" data-clip="airhorn" onclick="playSB(this)"><span class="sb-ico">&#128227;</span><span class="sb-name">airhorn</span></button>
-<button class="sb-btn" data-clip="sad_trombone" onclick="playSB(this)"><span class="sb-ico">&#127930;</span><span class="sb-name">trombone</span></button>
-<button class="sb-btn" data-clip="rimshot" onclick="playSB(this)"><span class="sb-ico">&#129345;</span><span class="sb-name">ba dum tss</span></button>
-<button class="sb-btn" data-clip="crickets" onclick="playSB(this)"><span class="sb-ico">&#129431;</span><span class="sb-name">crickets</span></button>
-<button class="sb-btn" data-clip="fart" onclick="playSB(this)"><span class="sb-ico">&#128168;</span><span class="sb-name">fart</span></button>
-<button class="sb-btn" data-clip="siren" onclick="playSB(this)"><span class="sb-ico">&#128680;</span><span class="sb-name">siren</span></button>
-<button class="sb-btn" data-clip="beep" onclick="playSB(this)"><span class="sb-ico">&#128264;</span><span class="sb-name">beep</span></button>
-<button class="sb-btn" data-clip="dial_tone" onclick="playSB(this)"><span class="sb-ico">&#128222;</span><span class="sb-name">dial tone</span></button>
-<button class="sb-btn" data-clip="busy" onclick="playSB(this)"><span class="sb-ico">&#128683;</span><span class="sb-name">busy</span></button>
+<button class="sb-btn" data-clip="hold_music" onclick="playSB(this)"><span class="sb-ico">&#127925;</span><span class="sb-name">hold music</span></button>
+<button class="sb-btn" data-clip="ivr_menu" onclick="playSB(this)"><span class="sb-ico">&#128290;</span><span class="sb-name">ivr beep</span></button>
+<button class="sb-btn" data-clip="transfer" onclick="playSB(this)"><span class="sb-ico">&#128257;</span><span class="sb-name">transfer</span></button>
+<button class="sb-btn" data-clip="typing" onclick="playSB(this)"><span class="sb-ico">&#9000;</span><span class="sb-name">typing</span></button>
+<button class="sb-btn" data-clip="confirm" onclick="playSB(this)"><span class="sb-ico">&#9989;</span><span class="sb-name">confirm</span></button>
+<button class="sb-btn" data-clip="error_tone" onclick="playSB(this)"><span class="sb-ico">&#10060;</span><span class="sb-name">error</span></button>
+<button class="sb-btn" data-clip="hold_beep" onclick="playSB(this)"><span class="sb-ico">&#128276;</span><span class="sb-name">hold beep</span></button>
+<button class="sb-btn" data-clip="ring_back" onclick="playSB(this)"><span class="sb-ico">&#128222;</span><span class="sb-name">ring back</span></button>
+<button class="sb-btn" data-clip="dial_tone" onclick="playSB(this)"><span class="sb-ico">&#128251;</span><span class="sb-name">dial tone</span></button>
 </div>
 <div class="sb-tts">
 <input id="sb-tts-text" placeholder="type anything to say..." style="margin-bottom:6px">
