@@ -28,6 +28,7 @@ import math
 from lead_caller_sip import (
     generate_tts, mp3_to_ulaw, normalize_number, do_call, do_bridge_call,
     do_direct_call, get_local_ip, SIPCall, build_rtp_packet, FRAME_SIZE,
+    dtmf_listener,
 )
 
 app = Flask(__name__)
@@ -864,6 +865,307 @@ def run_direct_calls(numbers, cfg, message, voice, pause, trigger_digit,
         push_event("batch_done", {"n": len(numbers), "error": str(e)})
 
 
+# ── Auto Dialer (batch dial + soundboard) ────────────────────
+
+ad_stop_event = threading.Event()
+ad_next_event = threading.Event()
+ad_soundboard_q = queue.Queue()
+ad_batch_state = {"running": False, "rows": [], "status_msg": "ready", "current_idx": -1}
+ad_ws_clients = []
+ad_ws_lock = threading.Lock()
+
+
+def _gen_tone(freqs, duration, amplitude=4000):
+    sr = 8000
+    out = bytearray()
+    ns = int(sr * duration)
+    fade = int(sr * 0.008)
+    for i in range(ns):
+        env = 1.0
+        if i < fade:
+            env = i / fade
+        elif i > ns - fade:
+            env = (ns - i) / fade
+        val = 0
+        for f in freqs:
+            val += math.sin(2 * math.pi * f * i / sr)
+        s = int(env * amplitude * val / max(len(freqs), 1))
+        out.append(_linear_to_ulaw(s))
+    return bytes(out)
+
+
+def _gen_sweep(f_start, f_end, duration, amplitude=4000):
+    sr = 8000
+    out = bytearray()
+    ns = int(sr * duration)
+    fade = int(sr * 0.008)
+    for i in range(ns):
+        t = i / ns
+        freq = f_start + (f_end - f_start) * t
+        env = 1.0
+        if i < fade:
+            env = i / fade
+        elif i > ns - fade:
+            env = (ns - i) / fade
+        s = int(env * amplitude * math.sin(2 * math.pi * freq * i / sr))
+        out.append(_linear_to_ulaw(s))
+    return bytes(out)
+
+
+def _build_soundboard():
+    sb = {}
+    sb["airhorn"] = (
+        _gen_tone([440, 554, 659], 0.15, 6000)
+        + _gen_tone([466, 587, 698], 0.15, 6000)
+        + _gen_tone([440, 554, 659], 0.12, 6500)
+        + _gen_tone([466, 587, 698], 0.12, 6500)
+        + _gen_tone([440, 554, 659, 880], 0.8, 7000)
+    )
+    sb["sad_trombone"] = (
+        _gen_tone([293], 0.35, 5000)
+        + _gen_tone([277], 0.35, 5000)
+        + _gen_tone([261], 0.35, 5000)
+        + _gen_tone([247], 0.7, 4500)
+    )
+    sb["rimshot"] = (
+        _gen_tone([800, 1200], 0.04, 6000)
+        + bytes([0xFF] * 400)
+        + _gen_tone([600, 1000], 0.04, 6000)
+        + bytes([0xFF] * 400)
+        + _gen_tone([200, 400, 800, 1600], 0.15, 7000)
+    )
+    sb["crickets"] = b""
+    for _ in range(6):
+        sb["crickets"] += _gen_tone([4000, 4500], 0.06, 2000) + bytes([0xFF] * 640)
+    sb["fart"] = _gen_sweep(120, 60, 0.6, 5500) + _gen_sweep(80, 40, 0.3, 3000)
+    sb["beep"] = _gen_tone([1000], 0.3, 4000)
+    sb["dial_tone"] = _gen_tone([350, 440], 1.5, 3500)
+    sb["busy"] = b""
+    for _ in range(4):
+        sb["busy"] += _gen_tone([480, 620], 0.5, 3500) + bytes([0xFF] * 4000)
+    sb["siren"] = b""
+    for _ in range(3):
+        sb["siren"] += _gen_sweep(600, 1400, 0.4, 5000) + _gen_sweep(1400, 600, 0.4, 5000)
+    return sb
+
+
+SOUNDBOARD_CLIPS = _build_soundboard()
+
+
+def _ad_audio_send(raw):
+    with ad_ws_lock:
+        dead = []
+        for ws in ad_ws_clients:
+            try:
+                ws.send(raw)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            try:
+                ad_ws_clients.remove(ws)
+            except ValueError:
+                pass
+
+
+def _ad_audio_in(data):
+    _ad_audio_send(b'\x02' + data)
+
+
+def _ad_audio_out(data):
+    _ad_audio_send(b'\x01' + data)
+
+
+def run_auto_dial_calls(numbers, cfg, max_duration, user_id=None):
+    ad_stop_event.clear()
+    ad_next_event.clear()
+    ad_batch_state["running"] = True
+    ad_batch_state["status_msg"] = "starting..."
+    ad_batch_state["rows"] = [{"number": n, "status": "pending", "dtmf": "", "ts": ""} for n in numbers]
+    ad_batch_state["current_idx"] = -1
+
+    while not ad_soundboard_q.empty():
+        try:
+            ad_soundboard_q.get_nowait()
+        except queue.Empty:
+            break
+
+    try:
+        local_ip = get_local_ip()
+        push_event("ad_status", {"msg": f"starting — {len(numbers)} numbers"})
+
+        for i, num in enumerate(numbers):
+            if ad_stop_event.is_set():
+                push_event("ad_done", {"n": len(numbers), "stopped": True})
+                return
+            ad_next_event.clear()
+            ad_batch_state["current_idx"] = i
+
+            entry = {
+                "number": num, "status": "calling", "dtmf": "",
+                "ts": time.strftime("%H:%M:%S"), "i": i + 1, "n": len(numbers),
+            }
+            push_event("ad_start", entry)
+            push_event("ad_status", {"msg": f"dialing {num} ({i+1}/{len(numbers)})..."})
+
+            for r in ad_batch_state["rows"]:
+                if r["number"] == num and r["status"] == "pending":
+                    r["status"] = "calling"
+                    r["ts"] = entry["ts"]
+                    break
+
+            rtp_port = random.randint(10000, 20000) & 0xFFFE
+            sip = SIPCall(
+                cfg["server"], cfg["port"], cfg["user"], cfg["password"],
+                cfg["caller_id"], local_ip,
+                cfg.get("sip_port", 5080),
+            )
+
+            try:
+                rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                rtp_sock.bind((local_ip, rtp_port))
+                rtp_sock.settimeout(1)
+
+                code, ctx, remote_rtp = sip.invite(num, rtp_port, rtp_sock, cancel_event=ad_stop_event)
+
+                if ad_stop_event.is_set():
+                    rtp_sock.close()
+                    sip.close()
+                    entry["status"] = "failed"
+                    push_event("ad_end", entry)
+                    push_event("ad_done", {"n": len(numbers), "stopped": True})
+                    return
+
+                if code == 200 and remote_rtp:
+                    entry["status"] = "answered"
+                    push_event("ad_answered", entry)
+                    push_event("ad_status", {"msg": f"{num} — connected (soundboard ready)"})
+
+                    for r in ad_batch_state["rows"]:
+                        if r["number"] == num:
+                            r["status"] = "answered"
+                            break
+
+                    digits = []
+                    disconnect_evt = threading.Event()
+                    screening_flag = [False]
+                    dtmf_stop = threading.Event()
+                    dtmf_thread = threading.Thread(
+                        target=dtmf_listener,
+                        args=(rtp_sock, dtmf_stop, digits),
+                        kwargs={"audio_cb": _ad_audio_in,
+                                "disconnect_evt": disconnect_evt,
+                                "screening_flag": screening_flag},
+                        daemon=True,
+                    )
+                    dtmf_thread.start()
+
+                    ssrc = random.getrandbits(32)
+                    seq = random.randint(0, 0xFFFF)
+                    timestamp = 0
+                    silence = bytes([0xFF] * FRAME_SIZE)
+                    call_start = time.time()
+
+                    while True:
+                        if ad_stop_event.is_set() or ad_next_event.is_set():
+                            break
+                        if disconnect_evt.is_set():
+                            break
+                        if time.time() - call_start > max_duration:
+                            break
+
+                        sb_audio = None
+                        try:
+                            sb_audio = ad_soundboard_q.get_nowait()
+                        except queue.Empty:
+                            pass
+
+                        if sb_audio:
+                            offset = 0
+                            while offset < len(sb_audio):
+                                if ad_stop_event.is_set() or ad_next_event.is_set() or disconnect_evt.is_set():
+                                    break
+                                chunk = sb_audio[offset:offset + FRAME_SIZE]
+                                if len(chunk) < FRAME_SIZE:
+                                    chunk += bytes([0xFF] * (FRAME_SIZE - len(chunk)))
+                                pkt = build_rtp_packet(chunk, seq, timestamp, ssrc, 0)
+                                rtp_sock.sendto(pkt, remote_rtp)
+                                _ad_audio_out(chunk)
+                                seq = (seq + 1) & 0xFFFF
+                                timestamp += FRAME_SIZE
+                                offset += FRAME_SIZE
+                                time.sleep(0.02)
+                        else:
+                            pkt = build_rtp_packet(silence, seq, timestamp, ssrc, 0)
+                            rtp_sock.sendto(pkt, remote_rtp)
+                            seq = (seq + 1) & 0xFFFF
+                            timestamp += FRAME_SIZE
+                            time.sleep(0.02)
+
+                    dtmf_stop.set()
+                    dtmf_thread.join(timeout=1)
+                    try:
+                        sip.send_bye(ctx)
+                    except Exception:
+                        pass
+                    rtp_sock.close()
+
+                    if digits:
+                        entry["dtmf"] = "".join(digits)
+                    if disconnect_evt.is_set():
+                        entry["status"] = "disconnected"
+                        push_event("ad_status", {"msg": f"{num} — disconnected"})
+                    else:
+                        push_event("ad_status", {"msg": f"{num} — call ended"})
+                else:
+                    rtp_sock.close()
+                    entry["status"] = "failed"
+                    reason = {486: "busy", 603: "declined", 480: "unavailable", 404: "unavailable"}.get(code, "no answer")
+                    push_event("ad_status", {"msg": f"{num} — {reason}"})
+
+                for r in ad_batch_state["rows"]:
+                    if r["number"] == num:
+                        r["status"] = entry["status"]
+                        r["dtmf"] = entry.get("dtmf", "")
+                        break
+
+            except Exception as e:
+                entry["status"] = "failed"
+                push_event("ad_status", {"msg": f"{num} — error: {str(e)[:30]}"})
+            finally:
+                sip.close()
+
+            push_event("ad_end", entry)
+            if user_id:
+                try:
+                    c = get_db()
+                    c.execute(
+                        _q("INSERT INTO call_history(user_id, number, status, source) VALUES(?,?,?,?)"),
+                        (user_id, num, entry["status"], "autodial"),
+                    )
+                    c.commit()
+                    c.close()
+                except Exception:
+                    pass
+
+            if i < len(numbers) - 1 and not ad_stop_event.is_set():
+                d = cfg.get("delay", 2)
+                push_event("ad_status", {"msg": f"next in {d}s... ({len(numbers) - i - 1} remaining)"})
+                for _ in range(int(d * 10)):
+                    if ad_stop_event.is_set() or ad_next_event.is_set():
+                        break
+                    time.sleep(0.1)
+
+        push_event("ad_done", {"n": len(numbers)})
+        push_event("ad_status", {"msg": f"complete — {len(numbers)} numbers"})
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        push_event("ad_status", {"msg": f"error: {str(e)[:40]}"})
+        push_event("ad_done", {"n": len(numbers), "error": str(e)})
+    finally:
+        ad_batch_state["running"] = False
+        ad_batch_state["current_idx"] = -1
+
+
 # ── helpers ───────────────────────────────────────────────────
 
 def _build_sip_cfg(d):
@@ -1153,7 +1455,105 @@ def api_agent_status():
     return jsonify({"clocked_in": agent_clocked_in})
 
 
+# ── auto dialer routes ───────────────────────────────────────
+
+@app.route("/api/auto-call", methods=["POST"])
+@login_required
+def api_auto_call():
+    if ad_batch_state["running"]:
+        return jsonify(error="auto-dial already running"), 400
+    d = request.json or {}
+    raw = d.get("numbers", "").strip()
+    if not raw:
+        return jsonify(error="no numbers"), 400
+    nums = [normalize_number(n.strip()) for n in raw.replace(",", "\n").splitlines() if n.strip()]
+    if not nums:
+        return jsonify(error="no valid numbers"), 400
+    cfg = _build_sip_cfg(d)
+    cfg["caller_id"] = d.get("caller_id") or cfg["caller_id"]
+    if not cfg["user"] or not cfg["password"]:
+        return jsonify(error="sip credentials required"), 400
+    max_dur = int(d.get("max_duration", 120))
+    cfg["delay"] = float(d.get("delay", 2))
+    threading.Thread(
+        target=run_auto_dial_calls,
+        args=(nums, cfg, max_dur, session["uid"]),
+        daemon=True,
+    ).start()
+    return jsonify(ok=True, count=len(nums))
+
+
+@app.route("/api/auto-stop", methods=["POST"])
+@login_required
+def api_auto_stop():
+    ad_stop_event.set()
+    return jsonify(ok=True)
+
+
+@app.route("/api/auto-next", methods=["POST"])
+@login_required
+def api_auto_next():
+    ad_next_event.set()
+    return jsonify(ok=True)
+
+
+@app.route("/api/auto-state")
+@login_required
+def api_auto_state():
+    return jsonify(ad_batch_state)
+
+
+@app.route("/api/soundboard", methods=["POST"])
+@login_required
+def api_soundboard():
+    d = request.json or {}
+    clip = d.get("clip", "")
+    if clip == "custom_tts":
+        text = d.get("text", "").strip()
+        if not text:
+            return jsonify(error="no text"), 400
+        voice = d.get("voice", "en-US-AriaNeural")
+        try:
+            p = Path("_sb_tts.mp3")
+            generate_tts(text, voice, p)
+            ulaw = mp3_to_ulaw(p)
+            p.unlink(missing_ok=True)
+            ad_soundboard_q.put(ulaw)
+        except Exception as e:
+            return jsonify(error=str(e)[:60]), 500
+    elif clip in SOUNDBOARD_CLIPS:
+        ad_soundboard_q.put(SOUNDBOARD_CLIPS[clip])
+    else:
+        return jsonify(error="unknown clip"), 400
+    return jsonify(ok=True)
+
+
+@app.route("/api/soundboard-list")
+@login_required
+def api_soundboard_list():
+    return jsonify(list(SOUNDBOARD_CLIPS.keys()))
+
+
 # ── websocket ─────────────────────────────────────────────────
+
+@sock.route("/ws/adaudio")
+def ad_audio_ws(ws):
+    with ad_ws_lock:
+        ad_ws_clients.append(ws)
+    try:
+        while True:
+            data = ws.receive()
+            if data is None:
+                break
+    except Exception:
+        pass
+    finally:
+        with ad_ws_lock:
+            try:
+                ad_ws_clients.remove(ws)
+            except ValueError:
+                pass
+
 
 @sock.route("/ws/p1audio")
 def p1_audio_ws(ws):
@@ -1550,6 +1950,14 @@ hr.dv{border:none;border-top:1px solid var(--bd);margin:16px 0}
 .empty{color:var(--dm);font-size:.78rem;padding:8px 0}
 .redial{background:none;border:none;cursor:pointer;padding:2px;color:var(--dm);transition:color .15s;display:flex;align-items:center}
 .redial:hover{color:var(--ac)}
+.sb-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:10px}
+.sb-btn{background:var(--card);border:1px solid var(--bd);border-radius:6px;padding:8px 4px;cursor:pointer;text-align:center;transition:all .15s;color:var(--tx);font-family:inherit}
+.sb-btn:hover{border-color:#333;background:#161616}
+.sb-btn:active{transform:scale(.95);background:#1a1a1a}
+.sb-btn.playing{border-color:var(--ac);box-shadow:0 0 8px rgba(34,197,94,.2)}
+.sb-ico{display:block;font-size:1.1rem;margin-bottom:2px}
+.sb-name{font-size:.58rem;color:var(--dm);text-transform:uppercase;letter-spacing:.04em}
+.sb-tts{margin-top:8px;padding-top:8px;border-top:1px solid var(--bd)}
 .footer{text-align:center;padding:24px 0 16px;font-size:.58rem;color:var(--dm);letter-spacing:.12em;text-transform:uppercase}
 @media(max-width:480px){.row{flex-direction:column;gap:6px}.stats{grid-template-columns:1fr 1fr}}
 .bridge-toast{position:fixed;top:20px;right:20px;z-index:9999;width:320px;background:var(--card);border:1px solid var(--bd);border-left:3px solid var(--ac);border-radius:8px;padding:0;font-family:'Inter',sans-serif;animation:bslide .3s ease;overflow:hidden}
@@ -1601,6 +2009,7 @@ hr.dv{border:none;border-top:1px solid var(--bd);margin:16px 0}
 <div class="tabs">
 <button class="tab active" data-tab="dialer" onclick="switchTab('dialer')">dialer</button>
 <button class="tab" data-tab="p1bot" onclick="switchTab('p1bot')">p1 bot</button>
+<button class="tab" data-tab="autodial" onclick="switchTab('autodial')">auto dial</button>
 </div>
 
 <!-- dialer -->
@@ -1825,6 +2234,109 @@ hr.dv{border:none;border-top:1px solid var(--bd);margin:16px 0}
 
 </div>
 
+<!-- auto dial -->
+<div id="tab-autodial" class="tc" style="display:none">
+<div class="p1-wrap">
+
+<div class="p1-left">
+
+<div class="p1-sec">
+<div class="p1-secn"><span class="n">1</span><span class="t">phone numbers</span></div>
+<textarea id="ad-numbers" class="p1-nums" placeholder="one per line, comma, or csv"></textarea>
+<div class="p1-count"><span id="ad-numcount">0 numbers</span><label class="p1-csv">+ upload csv<input type="file" id="ad-csv" accept=".csv,.txt" style="display:none" onchange="adLoadCSV(this)"></label></div>
+</div>
+
+<div class="p1-sec">
+<div class="p1-secn"><span class="n">2</span><span class="t">settings</span></div>
+<div class="sl">caller id</div>
+<input id="ad-cid" value="18002893557" style="margin-bottom:8px">
+<div class="row" style="margin-bottom:8px">
+<div><div class="sl">delay (s)</div><input id="ad-delay" type="number" value="2" min="0" max="30"></div>
+<div><div class="sl">max duration (s)</div><input id="ad-maxdur" type="number" value="120" min="10" max="600"></div>
+</div>
+</div>
+
+<div class="p1-sec">
+<div class="p1-secn"><span class="n">3</span><span class="t">soundboard</span></div>
+<div class="sb-grid" id="sb-grid">
+<button class="sb-btn" data-clip="airhorn" onclick="playSB(this)"><span class="sb-ico">&#128227;</span><span class="sb-name">airhorn</span></button>
+<button class="sb-btn" data-clip="sad_trombone" onclick="playSB(this)"><span class="sb-ico">&#127930;</span><span class="sb-name">trombone</span></button>
+<button class="sb-btn" data-clip="rimshot" onclick="playSB(this)"><span class="sb-ico">&#129345;</span><span class="sb-name">ba dum tss</span></button>
+<button class="sb-btn" data-clip="crickets" onclick="playSB(this)"><span class="sb-ico">&#129431;</span><span class="sb-name">crickets</span></button>
+<button class="sb-btn" data-clip="fart" onclick="playSB(this)"><span class="sb-ico">&#128168;</span><span class="sb-name">fart</span></button>
+<button class="sb-btn" data-clip="siren" onclick="playSB(this)"><span class="sb-ico">&#128680;</span><span class="sb-name">siren</span></button>
+<button class="sb-btn" data-clip="beep" onclick="playSB(this)"><span class="sb-ico">&#128264;</span><span class="sb-name">beep</span></button>
+<button class="sb-btn" data-clip="dial_tone" onclick="playSB(this)"><span class="sb-ico">&#128222;</span><span class="sb-name">dial tone</span></button>
+<button class="sb-btn" data-clip="busy" onclick="playSB(this)"><span class="sb-ico">&#128683;</span><span class="sb-name">busy</span></button>
+</div>
+<div class="sb-tts">
+<input id="sb-tts-text" placeholder="type anything to say..." style="margin-bottom:6px">
+<div class="row">
+<div style="flex:1"><select id="sb-voice"><option value="en-US-AriaNeural">Aria</option><option value="en-US-GuyNeural">Guy</option><option value="en-US-JennyNeural">Jenny</option><option value="en-US-DavisNeural">Davis</option></select></div>
+<div><button class="btn btn-sm" onclick="playSBTTS()">speak</button></div>
+</div>
+</div>
+</div>
+
+<div class="p1-actions">
+<button class="btn btn-start" id="ad-start" onclick="startAD()"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-1px;margin-right:4px"><polygon points="5 3 19 12 5 21"/></svg>start</button>
+<button class="btn btn-ghost" id="ad-next" onclick="nextAD()" disabled>next &#8594;</button>
+<button class="btn btn-pause" id="ad-stop" onclick="stopAD()" disabled><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-1px;margin-right:4px"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>stop</button>
+</div>
+
+</div>
+
+<div class="p1-right">
+
+<div class="p1-stats">
+<div class="p1-stat pending"><div class="pv" id="ad-pending">0</div><div class="pl">pending</div></div>
+<div class="p1-stat dialing"><div class="pv" id="ad-dialing">0</div><div class="pl">dialing</div></div>
+<div class="p1-stat answered"><div class="pv" id="ad-answered">0</div><div class="pl">answered</div></div>
+<div class="p1-stat completed"><div class="pv" id="ad-completed">0</div><div class="pl">completed</div></div>
+<div class="p1-stat failed"><div class="pv" id="ad-failed">0</div><div class="pl">failed</div></div>
+</div>
+
+<div class="p1-pbar">
+<div class="p1-pbar-head"><span class="p1-pbar-label">progress</span><span class="p1-pbar-pct" id="ad-pct">0%</span></div>
+<div class="p1-pbar-track"><div class="p1-pbar-fill" id="ad-bar"></div></div>
+<div class="p1-pbar-legend">
+<span><span class="dot" style="background:var(--ac)"></span> completed</span>
+<span><span class="dot" style="background:var(--er)"></span> failed</span>
+<span><span class="dot" style="background:var(--wn)"></span> active</span>
+<span id="ad-total-label">0 total</span>
+</div>
+</div>
+
+<div class="p1-status-bar" id="ad-status-bar">
+<span class="pulse" id="ad-pulse" style="display:none"></span>
+<span id="ad-status-msg">ready</span>
+</div>
+
+<div class="p1-monitor" id="ad-monitor">
+<svg class="mon-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+<span class="mon-label">live audio monitor</span>
+<button class="mon-mute" id="ad-mute" onclick="toggleADMute()">mute</button>
+</div>
+
+<div class="p1-live-head"><span class="p1-live-title">live call status</span></div>
+<div class="p1-filters">
+<button class="p1-filt active" data-filter="all" onclick="setADFilter('all',this)">all</button>
+<button class="p1-filt" data-filter="calling" onclick="setADFilter('calling',this)">dialing</button>
+<button class="p1-filt" data-filter="answered" onclick="setADFilter('answered',this)">answered</button>
+<button class="p1-filt" data-filter="failed" onclick="setADFilter('failed',this)">failed</button>
+<button class="p1-filt" data-filter="pending" onclick="setADFilter('pending',this)">pending</button>
+</div>
+<table class="p1-table">
+<thead><tr><th>number</th><th>status</th><th>dtmf</th><th>dur</th><th>time</th></tr></thead>
+<tbody id="ad-tbody"></tbody>
+</table>
+<div class="p1-empty" id="ad-empty">start auto-dial to see live status</div>
+
+</div>
+
+</div>
+</div>
+
 <!-- settings view -->
 <div id="view-settings" class="view">
 <button class="back" onclick="hideSettings()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg> back</button>
@@ -1869,7 +2381,7 @@ const $=id=>document.getElementById(id);
 function switchTab(t){
 document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.tab===t));
 document.querySelectorAll('.tc').forEach(c=>c.style.display=c.id==='tab-'+t?'':'none');
-document.querySelector('.wrap').classList.toggle('wide',t==='p1bot'||t==='dialer');
+document.querySelector('.wrap').classList.toggle('wide',t==='p1bot'||t==='dialer'||t==='autodial');
 }
 function showSettings(){$('view-main').classList.remove('active');$('view-settings').classList.add('active')}
 function hideSettings(){$('view-settings').classList.remove('active');$('view-main').classList.add('active')}
@@ -2472,6 +2984,201 @@ fetch('/api/agent-status').then(r=>r.json()).then(d=>{
 if(d.clocked_in&&!agentClockedIn)clockIn();
 }).catch(()=>{});
 
+/* ── Auto Dial ── */
+let adRows=[],adFilter='all',adRunning=false;
+let adAudioWs=null,adCtx=null,adMuted=false,adProc=null;
+
+function adSplitNums(s){return s.replace(/\\r/g,'').split('\\n').join(',').split(',').map(x=>x.trim()).filter(Boolean)}
+function adCountNums(){
+const t=$('ad-numbers').value.trim();
+const n=t?adSplitNums(t).length:0;
+$('ad-numcount').textContent=n+' number'+(n!==1?'s':'');
+}
+$('ad-numbers').addEventListener('input',adCountNums);
+
+function adLoadCSV(inp){
+if(!inp.files[0])return;
+const r=new FileReader();
+r.onload=function(){
+const lines=adSplitNums(r.result).map(s=>s.replace(/[^0-9+]/g,'')).filter(s=>s.length>=7);
+$('ad-numbers').value=($('ad-numbers').value.trim()?$('ad-numbers').value.trim()+'\\n':'')+lines.join('\\n');
+adCountNums();
+};r.readAsText(inp.files[0]);inp.value='';
+}
+
+function initADDashboard(nums){
+adRows=nums.map(n=>({number:n,status:'pending',dtmf:'',dur:'',time:''}));
+$('ad-pending').textContent=nums.length;
+$('ad-dialing').textContent=0;$('ad-answered').textContent=0;$('ad-completed').textContent=0;$('ad-failed').textContent=0;
+$('ad-pct').textContent='0%';$('ad-bar').style.width='0';
+$('ad-total-label').textContent=nums.length+' total';
+$('ad-empty').style.display='none';
+renderADTable();
+}
+
+function updateADStats(){
+let pending=0,dialing=0,answered=0,completed=0,failed=0;
+adRows.forEach(r=>{
+if(r.status==='pending')pending++;
+else if(r.status==='calling')dialing++;
+else if(r.status==='answered'){answered++;dialing++}
+else if(r.status==='disconnected'){completed++}
+else if(r.status==='failed'){failed++;completed++}
+});
+$('ad-pending').textContent=pending;$('ad-dialing').textContent=dialing;
+$('ad-answered').textContent=answered;$('ad-completed').textContent=completed;$('ad-failed').textContent=failed;
+const done=completed+answered;
+const pct=adRows.length?((completed)/adRows.length*100):0;
+$('ad-pct').textContent=Math.round(pct)+'%';
+$('ad-bar').style.width=pct.toFixed(1)+'%';
+}
+
+function renderADTable(){
+const tb=$('ad-tbody');tb.innerHTML='';
+const show=adRows.filter(r=>adFilter==='all'||r.status===adFilter);
+if(!show.length){$('ad-empty').style.display='';$('ad-empty').textContent='no matching calls';return}
+$('ad-empty').style.display='none';
+show.forEach(r=>{
+const tr=document.createElement('tr');
+const sc=r.status==='answered'?'color:var(--ac)':r.status==='failed'||r.status==='disconnected'?'color:var(--er)':r.status==='calling'?'color:var(--wn)':'';
+tr.innerHTML='<td>'+r.number+'</td><td style="'+sc+'">'+r.status+'</td><td>'+r.dtmf+'</td><td>'+r.dur+'</td><td>'+r.time+'</td>';
+tb.appendChild(tr);
+});
+}
+
+function setADFilter(f,btn){
+adFilter=f;
+document.querySelectorAll('#tab-autodial .p1-filt').forEach(b=>b.classList.remove('active'));
+btn.classList.add('active');
+renderADTable();
+}
+
+function startAD(){
+const nums=$('ad-numbers').value.trim();
+if(!nums){alert('add numbers first');return}
+$('ad-start').disabled=true;$('ad-start').textContent='starting...';
+$('ad-stop').disabled=false;$('ad-next').disabled=false;
+adRunning=true;
+const numList=adSplitNums(nums);
+initADDashboard(numList);
+
+const payload={...sipCfg(),numbers:nums,caller_id:$('ad-cid').value||$('cid').value,delay:$('ad-delay').value,max_duration:$('ad-maxdur').value};
+fetch('/api/auto-call',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
+.then(r=>r.json()).then(d=>{if(d.error){alert(d.error);resetADButtons();return}
+startADAudio()})
+.catch(e=>{alert(e);resetADButtons()});
+}
+
+function stopAD(){
+fetch('/api/auto-stop',{method:'POST'});
+$('ad-stop').textContent='stopping...';$('ad-stop').disabled=true;
+}
+
+function nextAD(){
+fetch('/api/auto-next',{method:'POST'});
+}
+
+function resetADButtons(){
+$('ad-start').disabled=false;$('ad-start').innerHTML='<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-1px;margin-right:4px"><polygon points="5 3 19 12 5 21"/></svg>start';
+$('ad-stop').disabled=true;$('ad-stop').innerHTML='<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-1px;margin-right:4px"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>stop';
+$('ad-next').disabled=true;
+adRunning=false;
+}
+
+function playSB(btn){
+const clip=btn.dataset.clip;
+btn.classList.add('playing');
+fetch('/api/soundboard',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clip})})
+.then(r=>r.json()).then(d=>{if(d.error)console.warn(d.error)})
+.catch(()=>{});
+setTimeout(()=>btn.classList.remove('playing'),600);
+}
+
+function playSBTTS(){
+const text=$('sb-tts-text').value.trim();
+if(!text)return;
+const voice=$('sb-voice').value;
+fetch('/api/soundboard',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clip:'custom_tts',text,voice})})
+.then(r=>r.json()).then(d=>{if(d.error)alert(d.error)})
+.catch(()=>{});
+}
+
+function startADAudio(){
+stopADAudio();
+const proto=location.protocol==='https:'?'wss':'ws';
+adAudioWs=new WebSocket(proto+'://'+location.host+'/ws/adaudio');
+adAudioWs.binaryType='arraybuffer';
+adAudioWs.onmessage=function(e){
+if(adMuted||!(e.data instanceof ArrayBuffer))return;
+const arr=new Uint8Array(e.data);
+if(arr.length<2)return;
+const ch=arr[0];
+const pcmu=arr.slice(1);
+if(!adCtx)adCtx=new(window.AudioContext||window.webkitAudioContext)({sampleRate:8000});
+const buf=adCtx.createBuffer(1,pcmu.length,8000);
+const out=buf.getChannelData(0);
+for(let i=0;i<pcmu.length;i++){
+let v=pcmu[i]^0xFF;
+const sign=v&0x80;const exp=(v>>4)&7;const man=v&0x0F;
+let s=((man<<3)+132)<<exp;
+s-=132;if(sign)s=-s;
+out[i]=s/32768;
+}
+const src=adCtx.createBufferSource();src.buffer=buf;src.connect(adCtx.destination);src.start();
+};
+}
+
+function stopADAudio(){
+if(adAudioWs){try{adAudioWs.close()}catch(e){}adAudioWs=null}
+}
+
+function toggleADMute(){
+adMuted=!adMuted;$('ad-mute').textContent=adMuted?'unmute':'mute';
+}
+
+sse.addEventListener('ad_status',e=>{
+const d=JSON.parse(e.data);
+$('ad-status-msg').textContent=d.msg;
+$('ad-pulse').style.display=d.msg==='ready'?'none':'';
+});
+sse.addEventListener('ad_start',e=>{
+const d=JSON.parse(e.data);
+$('ad-start').disabled=true;$('ad-start').textContent='calling '+d.i+'/'+d.n;
+const row=adRows.find(r=>r.number===d.number&&r.status==='pending');
+if(row){row.status='calling';row.time=d.ts}
+updateADStats();renderADTable();
+});
+sse.addEventListener('ad_answered',e=>{
+const d=JSON.parse(e.data);
+const row=adRows.find(r=>r.number===d.number&&r.status==='calling');
+if(row){row.status='answered';row.time=d.ts}
+updateADStats();renderADTable();
+});
+sse.addEventListener('ad_end',e=>{
+const d=JSON.parse(e.data);
+const row=adRows.find(r=>r.number===d.number&&(r.status==='calling'||r.status==='answered'));
+if(row){row.status=d.status;row.dtmf=d.dtmf||'';row.time=d.ts}
+updateADStats();renderADTable();loadStats();
+});
+sse.addEventListener('ad_done',()=>{
+resetADButtons();loadHistory();stopADAudio();
+$('ad-status-msg').textContent='ready';$('ad-pulse').style.display='none';
+});
+
+fetch('/api/auto-state').then(r=>r.json()).then(st=>{
+if(st.rows&&st.rows.length){
+adRows=st.rows.map(r=>({number:r.number,status:r.status,dtmf:r.dtmf||'',dur:'',time:r.ts||''}));
+$('ad-empty').style.display='none';
+updateADStats();renderADTable();
+if(st.running){
+adRunning=true;
+$('ad-start').disabled=true;$('ad-start').textContent='running...';
+$('ad-stop').disabled=false;$('ad-next').disabled=false;
+startADAudio();
+}
+}
+}).catch(()=>{});
+
 /* call history */
 const REDIAL_SVG='<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>';
 function loadHistory(){
@@ -2481,7 +3188,7 @@ if(!rows.length){h.innerHTML='<div class="empty">no calls yet</div>';return}
 rows.forEach(r=>{
 const d=document.createElement('div');d.className='lr';
 const c=r.status==='answered'?'s-ok':r.status==='failed'?'s-fail':'s-call';
-const src=r.source==='p1bot'?'<span style="color:var(--dm);font-size:.66rem;margin-left:4px">p1</span>':'';
+const src=r.source==='p1bot'?'<span style="color:var(--dm);font-size:.66rem;margin-left:4px">p1</span>':r.source==='autodial'?'<span style="color:var(--dm);font-size:.66rem;margin-left:4px">ad</span>':'';
 const t=r.created_at?r.created_at.split(' ').pop().slice(0,5):'';
 d.innerHTML='<span><span class="n">'+r.number+'</span> <span class="'+c+'">'+r.status+'</span>'+src+'</span><span style="display:flex;align-items:center;gap:6px"><span class="m">'+t+'</span><button class="redial" data-num="'+r.number+'" title="redial">'+REDIAL_SVG+'</button></span>';
 d.querySelector('.redial').onclick=function(){redial(this.dataset.num)};
