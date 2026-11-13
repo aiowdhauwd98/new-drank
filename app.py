@@ -2484,7 +2484,8 @@ $('call-timer').textContent=fmtTime(elapsed);
 
 function stopCallTimer(){if(_callTimer){clearInterval(_callTimer);_callTimer=null}}
 
-function isUSNum(n){const d=n.replace(/[\s\-\(\)\.+]/g,'');const x=d.length===10&&d[0]!=='1'?'1'+d:d;return x.length===11&&x[0]==='1'&&'2345678'.includes(x[1])}
+function normNum(n){const d=n.replace(/[\s\-\(\)\.+]/g,'');return d.length===10&&d[0]!=='1'?'1'+d:d}
+function isUSNum(n){const x=normNum(n);return x.length===11&&x[0]==='1'&&'2345678'.includes(x[1])}
 
 function redial(num){$('dial-num').value=num;dial()}
 
@@ -2691,7 +2692,7 @@ p1Running=false;
 
 /* p1 dashboard */
 function initP1Dashboard(nums){
-p1Rows=nums.map(n=>({number:n,status:'pending',dtmf:'',dur:'',time:''}));
+p1Rows=nums.map(n=>({number:normNum(n),status:'pending',dtmf:'',dur:'',time:''}));
 $('ps-pending').textContent=nums.length;
 $('ps-dialing').textContent=0;$('ps-answered').textContent=0;$('ps-completed').textContent=0;$('ps-failed').textContent=0;
 $('p1-pct').textContent='0%';$('p1-bar').style.width='0';
@@ -2967,7 +2968,7 @@ adCountNums();
 }
 
 function initADDashboard(nums){
-adRows=nums.map(n=>({number:n,status:'pending',dtmf:'',dur:'',time:''}));
+adRows=nums.map(n=>({number:normNum(n),status:'pending',dtmf:'',dur:'',time:''}));
 $('ad-pending').textContent=nums.length;
 $('ad-dialing').textContent=0;$('ad-answered').textContent=0;$('ad-completed').textContent=0;$('ad-failed').textContent=0;
 $('ad-pct').textContent='0%';$('ad-bar').style.width='0';

@@ -765,14 +765,14 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
     Sets screening_flag[0]=True if AMD detects machine.
     Sets voicemail_evt if AMD detects machine (same signal, separate event)."""
     AMD_GRACE       = 1.5    # ignore connection artifacts
-    AMD_INIT_SIL    = 4.0    # no speech at all → machine (dead air pickup)
-    AMD_GREET_MAX   = 3.5    # total speech span first→last > this → machine
-    AMD_HUMAN_MAX   = 1.8    # speech span under this + silence → human
-    AMD_AFTER_SIL   = 1.2    # silence after speech ends before deciding
-    AMD_MAX_WORDS   = 5      # word count above this → machine
+    AMD_INIT_SIL    = 4.5    # no speech at all → machine (dead air pickup)
+    AMD_VOICE_MAX   = 3.0    # accumulated voice time (not span) → machine
+    AMD_HUMAN_VOICE = 1.5    # accumulated voice under this + silence → human
+    AMD_AFTER_SIL   = 1.5    # silence after speech before deciding
+    AMD_MAX_WORDS   = 6      # word count above this → machine
     AMD_WORD_GAP    = 0.10   # silence between words
     AMD_MIN_WORD    = 0.12   # minimum duration to count as a word
-    AMD_WINDOW      = 6.0    # total analysis window
+    AMD_WINDOW      = 7.0    # total analysis window
     AMD_ENERGY      = 250    # RMS threshold (decoded 16-bit PCM)
 
     seen_ts = set()
@@ -788,6 +788,7 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
     amd_cur_word_start = None
     amd_silence_start = None
     amd_word_count = 0
+    amd_voice_accum = 0.0
 
     def amd_machine(reason):
         nonlocal amd_decided
@@ -858,9 +859,10 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
                             amd_first_speech = now
                             if elapsed > AMD_INIT_SIL:
                                 amd_machine(f"initial silence {elapsed:.1f}s")
-                    speech_span = now - amd_first_speech
-                    if speech_span > AMD_GREET_MAX:
-                        amd_machine(f"greeting span {speech_span:.1f}s")
+                    else:
+                        amd_voice_accum += 0.02
+                    if amd_voice_accum > AMD_VOICE_MAX:
+                        amd_machine(f"voice {amd_voice_accum:.1f}s")
                 else:
                     if amd_in_speech:
                         if amd_silence_start is None:
@@ -875,18 +877,16 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
                     if amd_first_speech and amd_silence_start:
                         sil_dur = now - amd_silence_start
                         if sil_dur > AMD_AFTER_SIL:
-                            speech_span = (amd_last_speech or now) - amd_first_speech
-                            if speech_span < AMD_HUMAN_MAX:
-                                amd_human(f"short greeting {speech_span:.1f}s + silence")
+                            if amd_voice_accum < AMD_HUMAN_VOICE:
+                                amd_human(f"short voice {amd_voice_accum:.1f}s + silence")
                             else:
-                                amd_machine(f"long greeting {speech_span:.1f}s + silence")
+                                amd_machine(f"long voice {amd_voice_accum:.1f}s + silence")
             elif not amd_decided and elapsed >= AMD_WINDOW:
                 if amd_first_speech:
-                    speech_span = (amd_last_speech or now) - amd_first_speech
-                    if speech_span > AMD_HUMAN_MAX:
-                        amd_machine(f"timeout with {speech_span:.1f}s speech")
+                    if amd_voice_accum > AMD_HUMAN_VOICE:
+                        amd_machine(f"timeout with {amd_voice_accum:.1f}s voice")
                     else:
-                        amd_human("timeout — short speech")
+                        amd_human("timeout — short voice")
                 else:
                     amd_machine("timeout — no speech detected")
 
