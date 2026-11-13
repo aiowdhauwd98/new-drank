@@ -243,6 +243,7 @@ class LiveCall:
         self._connected_at = None
         self.active = False
         self.connected = False
+        self.state = "starting"
         self.stop_event = threading.Event()
         self.sip = None
         self.ctx = None
@@ -458,6 +459,12 @@ class LiveCall:
         self.stop_event.set()
 
     def _notify(self, msg):
+        if msg.get("type") == "status":
+            self.state = msg.get("text", "")
+        elif msg.get("type") == "connected":
+            self.state = "connected"
+        elif msg.get("type") in ("ended", "error"):
+            self.state = "ended"
         text = json.dumps(msg)
         for ws in list(self.ws_clients):
             try:
@@ -1190,6 +1197,23 @@ def api_dial():
     return jsonify(ok=True)
 
 
+@app.route("/api/call-state")
+@login_required
+def api_call_state():
+    with live_call_lock:
+        if live_call and live_call.active:
+            return jsonify(
+                active=True,
+                number=live_call.number,
+                connected=live_call.connected,
+                state=live_call.state,
+                duration=int(time.time() - live_call._connected_at) if live_call._connected_at else 0,
+            )
+    ad_running = ad_batch_state.get("running", False)
+    p1_running = p1_batch_state.get("running", False)
+    return jsonify(active=False, ad_running=ad_running, p1_running=p1_running)
+
+
 @app.route("/api/hangup", methods=["POST"])
 @login_required
 def api_hangup():
@@ -1480,6 +1504,10 @@ def audio_ws(ws):
         return
 
     live_call.ws_clients.append(ws)
+    if live_call.connected:
+        ws.send(json.dumps({"type": "connected"}))
+    elif live_call.state:
+        ws.send(json.dumps({"type": "status", "text": live_call.state}))
     try:
         while True:
             data = ws.receive()
@@ -2504,7 +2532,7 @@ function sendDTMF(d){if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'dtmf
 function hangup(){fetch('/api/hangup',{method:'POST'})}
 
 function resetDialer(){
-stopCallTimer();stopMic();if(ws){try{ws.close()}catch(e){}}ws=null;if(player){try{player.close()}catch(e){}}player=null;
+stopRingback();stopCallTimer();stopMic();if(ws){try{ws.close()}catch(e){}}ws=null;if(player){try{player.close()}catch(e){}}player=null;
 $('dial-idle').style.display='';$('dial-active').style.display='none';
 $('dial-num').disabled=false;$('dial-st').textContent='';$('call-timer').textContent='';
 micOn=false;$('mic-btn').textContent='mic off';$('mic-btn').classList.remove('on');
@@ -3105,6 +3133,7 @@ adRunning=true;
 $('ad-start').disabled=true;$('ad-start').textContent='running...';
 $('ad-stop').disabled=false;$('ad-next').disabled=false;
 startADAudio();
+if(st.rows.some(r=>r.status==='calling')){warmRingback();startRingback()}
 }
 }
 }).catch(()=>{});
@@ -3127,6 +3156,24 @@ h.appendChild(d);
 });
 }
 loadHistory();
+
+/* reconnect to active call on page load / refresh */
+fetch('/api/call-state').then(r=>r.json()).then(st=>{
+if(st.active){
+$('dial-idle').style.display='none';$('dial-active').style.display='';
+$('dial-num').value=st.number;$('dial-num').disabled=true;
+if(st.connected){
+$('dial-st').textContent='picked up';$('dial-st').style.color='var(--ac)';
+_callStart=Date.now()-st.duration*1000;
+$('call-timer').textContent=fmtTime(st.duration);
+_callTimer=setInterval(()=>{const e=Math.floor((Date.now()-_callStart)/1000);$('call-timer').textContent=fmtTime(e)},1000);
+}else{
+$('dial-st').textContent=st.state||'connecting...';$('dial-st').style.color='var(--dm)';
+warmRingback();startRingback();
+}
+connectAudio();
+}
+}).catch(()=>{});
 </script>
 </body></html>"""
 
