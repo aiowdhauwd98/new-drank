@@ -2417,7 +2417,7 @@ function ulE(s){s=Math.max(-1,Math.min(1,s));let v=Math.round(s*32768),g=0;if(v<
 /* audio player — accumulate then schedule, browser resamples */
 class Player{
 constructor(){
-this.ctx=new AudioContext({latencyHint:'interactive'});
+this.ctx=new AudioContext({sampleRate:8000,latencyHint:'interactive'});
 const sid=$('spk-sel').value;
 if(sid&&this.ctx.setSinkId)this.ctx.setSinkId(sid).catch(()=>{});
 const ULAW=new Float32Array(256);
@@ -2426,7 +2426,7 @@ this.ULAW=ULAW;this.nt=0;this.acc=[];this.accLen=0;
 }
 feed(b){
 this.acc.push(b);this.accLen+=b.length;
-if(this.accLen<640)return;
+if(this.accLen<160)return;
 const fl=new Float32Array(this.accLen);
 let off=0;
 for(const chunk of this.acc){for(let i=0;i<chunk.length;i++)fl[off++]=this.ULAW[chunk[i]]}
@@ -2436,36 +2436,46 @@ buf.getChannelData(0).set(fl);
 const src=this.ctx.createBufferSource();
 src.buffer=buf;src.connect(this.ctx.destination);
 const now=this.ctx.currentTime;
-if(this.nt<now+0.005)this.nt=now+0.01;
-else if(this.nt>now+0.15)this.nt=now+0.01;
+if(this.nt<now)this.nt=now+0.005;
+else if(this.nt>now+0.08)this.nt=now+0.005;
 src.start(this.nt);this.nt+=fl.length/8000;
 }
 close(){try{this.ctx.close()}catch(e){}}
 }
 
-/* ringback tone — US standard 440+480Hz, 2s on / 4s off
-   pre-warm AudioContext from user gesture so autoplay policy allows it */
-let _rbCtx=null,_rbOsc1=null,_rbOsc2=null,_rbGain=null,_rbIv=null;
-function warmRingback(){
-if(!_rbCtx||_rbCtx.state==='closed'){_rbCtx=new(window.AudioContext||window.webkitAudioContext)()}
-if(_rbCtx.state==='suspended')_rbCtx.resume();
+/* ringback — pre-rendered 6s buffer (2s tone + 4s silence), looped via <audio> */
+let _rbAudio=null;
+(function buildRingback(){
+const sr=44100,toneDur=2*sr,silDur=4*sr,total=toneDur+silDur;
+const buf=new Float32Array(total);
+for(let i=0;i<toneDur;i++){
+const t=i/sr;
+buf[i]=0.25*(Math.sin(2*Math.PI*440*t)+Math.sin(2*Math.PI*480*t));
 }
-function startRingback(){
-stopRingback();
-if(!_rbCtx||_rbCtx.state==='closed'){_rbCtx=new(window.AudioContext||window.webkitAudioContext)()}
-if(_rbCtx.state==='suspended')_rbCtx.resume();
-_rbGain=_rbCtx.createGain();_rbGain.gain.value=0.35;_rbGain.connect(_rbCtx.destination);
-_rbOsc1=_rbCtx.createOscillator();_rbOsc1.frequency.value=440;_rbOsc1.connect(_rbGain);_rbOsc1.start();
-_rbOsc2=_rbCtx.createOscillator();_rbOsc2.frequency.value=480;_rbOsc2.connect(_rbGain);_rbOsc2.start();
-function cycle(){_rbIv=setTimeout(()=>{if(!_rbGain)return;_rbGain.gain.value=0;_rbIv=setTimeout(()=>{if(!_rbGain)return;_rbGain.gain.value=0.35;cycle()},4000)},2000)}
-cycle();
+const ctx=new OfflineAudioContext(1,total,sr);
+const ab=ctx.createBuffer(1,total,sr);
+ab.getChannelData(0).set(buf);
+const src=ctx.createBufferSource();src.buffer=ab;src.connect(ctx.destination);src.start();
+ctx.startRendering().then(rendered=>{
+const wav=encodeWAV(rendered);
+_rbAudio=new Audio(URL.createObjectURL(new Blob([wav],{type:'audio/wav'})));
+_rbAudio.loop=true;_rbAudio.volume=0.5;
+});
+function encodeWAV(ab){
+const ch=ab.getChannelData(0),len=ch.length,bps=16;
+const buf=new ArrayBuffer(44+len*2),v=new DataView(buf);
+function s(o,str){for(let i=0;i<str.length;i++)v.setUint8(o+i,str.charCodeAt(i))}
+s(0,'RIFF');v.setUint32(4,36+len*2,true);s(8,'WAVE');s(12,'fmt ');
+v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);
+v.setUint32(24,sr,true);v.setUint32(28,sr*2,true);v.setUint16(32,2,true);v.setUint16(34,bps,true);
+s(36,'data');v.setUint32(40,len*2,true);
+for(let i=0;i<len;i++){const s=Math.max(-1,Math.min(1,ch[i]));v.setInt16(44+i*2,s<0?s*0x8000:s*0x7FFF,true)}
+return buf;
 }
-function stopRingback(){
-if(_rbOsc1){try{_rbOsc1.stop()}catch(e){}_rbOsc1=null}
-if(_rbOsc2){try{_rbOsc2.stop()}catch(e){}_rbOsc2=null}
-if(_rbGain){_rbGain=null}
-if(_rbIv){clearTimeout(_rbIv);_rbIv=null}
-}
+})();
+function startRingback(){if(_rbAudio){_rbAudio.currentTime=0;_rbAudio.play().catch(()=>{})}}
+function stopRingback(){if(_rbAudio){_rbAudio.pause();_rbAudio.currentTime=0}}
+function warmRingback(){}
 
 /* dialer */
 let ws=null,player=null,micStream=null,micProc=null,micCtx=null,micOn=false;
