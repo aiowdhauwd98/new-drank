@@ -758,12 +758,14 @@ DTMF_EVENTS = {
 }
 
 def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
-                   disconnect_evt=None, screening_flag=None, voicemail_evt=None):
+                   disconnect_evt=None, screening_flag=None, voicemail_evt=None,
+                   amd_decided_evt=None):
     """Background thread: receives RTP, detects RFC 4733 DTMF events.
     If audio_cb is set, forwards non-DTMF audio payloads to it.
     Sets disconnect_evt if no RTP received for 8s.
     Sets screening_flag[0]=True if AMD detects machine.
-    Sets voicemail_evt if AMD detects machine (same signal, separate event)."""
+    Sets voicemail_evt if AMD detects machine (same signal, separate event).
+    Sets amd_decided_evt when AMD reaches any decision (human or machine)."""
     AMD_GRACE       = 1.5    # ignore connection artifacts
     AMD_INIT_SIL    = 4.5    # no speech at all → machine (dead air pickup)
     AMD_VOICE_MAX   = 3.0    # accumulated voice time (not span) → machine
@@ -800,6 +802,8 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
             screening_flag[0] = True
         if voicemail_evt:
             voicemail_evt.set()
+        if amd_decided_evt:
+            amd_decided_evt.set()
 
     def amd_human(reason):
         nonlocal amd_decided
@@ -807,6 +811,8 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
             return
         amd_decided = True
         print(f"  [AMD] HUMAN — {reason}")
+        if amd_decided_evt:
+            amd_decided_evt.set()
 
     while not stop_evt.is_set():
         try:
@@ -906,9 +912,10 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
 
 def stream_rtp(rtp_sock, remote_addr, ulaw_data: bytes, pause_sec: int,
                digits_list=None, audio_cb=None, disconnect_evt=None, stop_event=None,
-               voicemail_evt=None):
+               voicemail_evt=None, amd_decided_evt=None):
     """Stream silence (pause) then ulaw audio as RTP packets. Returns when done.
-    If disconnect_evt, stop_event, or voicemail_evt is set externally, stops early."""
+    If amd_decided_evt is given, keeps sending silence after pause until AMD decides.
+    If voicemail_evt fires, aborts immediately (no TTS to voicemail)."""
     ssrc = random.getrandbits(32)
     seq = random.randint(0, 0xFFFF)
     timestamp = 0
@@ -916,10 +923,15 @@ def stream_rtp(rtp_sock, remote_addr, ulaw_data: bytes, pause_sec: int,
 
     silence = bytes([0xFF] * FRAME_SIZE)
 
+    def _should_stop():
+        return ((disconnect_evt and disconnect_evt.is_set()) or
+                (stop_event and stop_event.is_set()) or
+                (voicemail_evt and voicemail_evt.is_set()))
+
     pause_frames = (pause_sec * SAMPLE_RATE) // FRAME_SIZE
     print(f"  [+] sending {pause_sec}s silence ({pause_frames} frames) ...")
     for _ in range(pause_frames):
-        if (disconnect_evt and disconnect_evt.is_set()) or (stop_event and stop_event.is_set()) or (voicemail_evt and voicemail_evt.is_set()):
+        if _should_stop():
             print("  [!] stopped during pause — aborting stream")
             return seq, timestamp, ssrc
         pkt = build_rtp_packet(silence, seq, timestamp, ssrc, pt)
@@ -928,10 +940,25 @@ def stream_rtp(rtp_sock, remote_addr, ulaw_data: bytes, pause_sec: int,
         timestamp += FRAME_SIZE
         time.sleep(0.02)
 
+    if amd_decided_evt and not amd_decided_evt.is_set():
+        max_wait_frames = (10 * SAMPLE_RATE) // FRAME_SIZE
+        print("  [+] waiting for AMD decision before TTS ...")
+        for _ in range(max_wait_frames):
+            if _should_stop() or amd_decided_evt.is_set():
+                break
+            pkt = build_rtp_packet(silence, seq, timestamp, ssrc, pt)
+            rtp_sock.sendto(pkt, remote_addr)
+            seq = (seq + 1) & 0xFFFF
+            timestamp += FRAME_SIZE
+            time.sleep(0.02)
+        if voicemail_evt and voicemail_evt.is_set():
+            print("  [!] voicemail detected — skipping TTS entirely")
+            return seq, timestamp, ssrc
+
     print(f"  [+] streaming audio ({len(ulaw_data) / SAMPLE_RATE:.1f}s) ...")
     offset = 0
     while offset < len(ulaw_data):
-        if (disconnect_evt and disconnect_evt.is_set()) or (stop_event and stop_event.is_set()) or (voicemail_evt and voicemail_evt.is_set()):
+        if _should_stop():
             print("  [!] stopped during audio — aborting stream")
             return seq, timestamp, ssrc
         chunk = ulaw_data[offset:offset + FRAME_SIZE]
@@ -1218,6 +1245,7 @@ def do_direct_call(server, port, username, password, caller_id, number,
                 digits = []
                 disconnect_evt = threading.Event()
                 voicemail_evt = threading.Event()
+                amd_decided_evt = threading.Event()
                 screening_flag = [False]
                 dtmf_stop = threading.Event()
                 dtmf_thread = threading.Thread(
@@ -1225,7 +1253,8 @@ def do_direct_call(server, port, username, password, caller_id, number,
                     args=(rtp_sock, dtmf_stop, digits),
                     kwargs={"audio_cb": audio_cb, "disconnect_evt": disconnect_evt,
                             "screening_flag": screening_flag,
-                            "voicemail_evt": voicemail_evt},
+                            "voicemail_evt": voicemail_evt,
+                            "amd_decided_evt": amd_decided_evt},
                     daemon=True,
                 )
                 dtmf_thread.start()
@@ -1236,7 +1265,8 @@ def do_direct_call(server, port, username, password, caller_id, number,
                                            audio_cb=audio_out_monitor_cb,
                                            disconnect_evt=disconnect_evt,
                                            stop_event=stop_event,
-                                           voicemail_evt=voicemail_evt)
+                                           voicemail_evt=voicemail_evt,
+                                           amd_decided_evt=amd_decided_evt)
                 else:
                     time.sleep(5)
                     rtp_state = None
@@ -1420,6 +1450,7 @@ def do_call(server, port, username, password, caller_id, number,
                 digits = []
                 disconnect_evt = threading.Event()
                 voicemail_evt = threading.Event()
+                amd_decided_evt = threading.Event()
                 screening_flag = [False]
                 dtmf_stop = threading.Event()
                 dtmf_thread = threading.Thread(
@@ -1427,7 +1458,8 @@ def do_call(server, port, username, password, caller_id, number,
                     args=(rtp_sock, dtmf_stop, digits),
                     kwargs={"audio_cb": audio_cb, "disconnect_evt": disconnect_evt,
                             "screening_flag": screening_flag,
-                            "voicemail_evt": voicemail_evt},
+                            "voicemail_evt": voicemail_evt,
+                            "amd_decided_evt": amd_decided_evt},
                     daemon=True,
                 )
                 dtmf_thread.start()
@@ -1438,7 +1470,8 @@ def do_call(server, port, username, password, caller_id, number,
                                            audio_cb=audio_out_cb,
                                            disconnect_evt=disconnect_evt,
                                            stop_event=stop_event,
-                                           voicemail_evt=voicemail_evt)
+                                           voicemail_evt=voicemail_evt,
+                                           amd_decided_evt=amd_decided_evt)
                 else:
                     print("  [+] no message, holding 5s ...")
                     time.sleep(5)

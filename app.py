@@ -2418,6 +2418,7 @@ function ulE(s){s=Math.max(-1,Math.min(1,s));let v=Math.round(s*32768),g=0;if(v<
 class Player{
 constructor(){
 this.ctx=new AudioContext({sampleRate:8000,latencyHint:'interactive'});
+if(this.ctx.state==='suspended')this.ctx.resume().catch(()=>{});
 const sid=$('spk-sel').value;
 if(sid&&this.ctx.setSinkId)this.ctx.setSinkId(sid).catch(()=>{});
 const ULAW=new Float32Array(256);
@@ -2425,6 +2426,7 @@ for(let i=0;i<256;i++){let b=~i&0xFF;let s=((b&0x0F)<<3)+0x84;s<<=(b>>4)&7;if(b&
 this.ULAW=ULAW;this.nt=0;this.acc=[];this.accLen=0;
 }
 feed(b){
+if(this.ctx.state==='suspended')this.ctx.resume().catch(()=>{});
 this.acc.push(b);this.accLen+=b.length;
 if(this.accLen<160)return;
 const fl=new Float32Array(this.accLen);
@@ -2442,40 +2444,64 @@ src.start(this.nt);this.nt+=fl.length/8000;
 }
 close(){try{this.ctx.close()}catch(e){}}
 }
+document.addEventListener('click',()=>{if(player&&player.ctx.state==='suspended')player.ctx.resume()},{once:false});
 
-/* ringback — pre-rendered 6s buffer (2s tone + 4s silence), looped via <audio> */
-let _rbAudio=null;
+/* ringback — dual approach: <audio> primary, Web Audio oscillator fallback */
+let _rbAudio=null,_rbCtx=null,_rbOsc1=null,_rbOsc2=null,_rbGain=null,_rbMode=null;
 (function buildRingback(){
 const sr=44100,toneDur=2*sr,silDur=4*sr,total=toneDur+silDur;
 const buf=new Float32Array(total);
-for(let i=0;i<toneDur;i++){
-const t=i/sr;
-buf[i]=0.25*(Math.sin(2*Math.PI*440*t)+Math.sin(2*Math.PI*480*t));
-}
+for(let i=0;i<toneDur;i++){const t=i/sr;buf[i]=0.25*(Math.sin(2*Math.PI*440*t)+Math.sin(2*Math.PI*480*t))}
 const ctx=new OfflineAudioContext(1,total,sr);
 const ab=ctx.createBuffer(1,total,sr);
 ab.getChannelData(0).set(buf);
 const src=ctx.createBufferSource();src.buffer=ab;src.connect(ctx.destination);src.start();
 ctx.startRendering().then(rendered=>{
-const wav=encodeWAV(rendered);
-_rbAudio=new Audio(URL.createObjectURL(new Blob([wav],{type:'audio/wav'})));
-_rbAudio.loop=true;_rbAudio.volume=0.5;
-});
-function encodeWAV(ab){
-const ch=ab.getChannelData(0),len=ch.length,bps=16;
-const buf=new ArrayBuffer(44+len*2),v=new DataView(buf);
+const ch=rendered.getChannelData(0),len=ch.length,bps=16;
+const wb=new ArrayBuffer(44+len*2),v=new DataView(wb);
 function s(o,str){for(let i=0;i<str.length;i++)v.setUint8(o+i,str.charCodeAt(i))}
 s(0,'RIFF');v.setUint32(4,36+len*2,true);s(8,'WAVE');s(12,'fmt ');
 v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);
 v.setUint32(24,sr,true);v.setUint32(28,sr*2,true);v.setUint16(32,2,true);v.setUint16(34,bps,true);
 s(36,'data');v.setUint32(40,len*2,true);
-for(let i=0;i<len;i++){const s=Math.max(-1,Math.min(1,ch[i]));v.setInt16(44+i*2,s<0?s*0x8000:s*0x7FFF,true)}
-return buf;
-}
+for(let i=0;i<len;i++){const x=Math.max(-1,Math.min(1,ch[i]));v.setInt16(44+i*2,x<0?x*0x8000:x*0x7FFF,true)}
+_rbAudio=new Audio(URL.createObjectURL(new Blob([wb],{type:'audio/wav'})));
+_rbAudio.loop=true;_rbAudio.volume=0.5;
+}).catch(()=>{});
 })();
-function startRingback(){if(_rbAudio){_rbAudio.currentTime=0;_rbAudio.play().catch(()=>{})}}
-function stopRingback(){if(_rbAudio){_rbAudio.pause();_rbAudio.currentTime=0}}
-function warmRingback(){}
+function _rbOscStart(){
+try{
+if(!_rbCtx||_rbCtx.state==='closed')_rbCtx=new(window.AudioContext||window.webkitAudioContext)();
+if(_rbCtx.state==='suspended')_rbCtx.resume();
+_rbGain=_rbCtx.createGain();_rbGain.gain.value=0;_rbGain.connect(_rbCtx.destination);
+_rbOsc1=_rbCtx.createOscillator();_rbOsc1.frequency.value=440;_rbOsc1.connect(_rbGain);_rbOsc1.start();
+_rbOsc2=_rbCtx.createOscillator();_rbOsc2.frequency.value=480;_rbOsc2.connect(_rbGain);_rbOsc2.start();
+const t=_rbCtx.currentTime;
+for(let i=0;i<20;i++){_rbGain.gain.setValueAtTime(0.3,t+i*6);_rbGain.gain.setValueAtTime(0,t+i*6+2)}
+_rbMode='osc';
+}catch(e){console.error('ringback osc fallback failed:',e)}
+}
+function _rbOscStop(){
+if(_rbOsc1){try{_rbOsc1.stop()}catch(e){}_rbOsc1=null}
+if(_rbOsc2){try{_rbOsc2.stop()}catch(e){}_rbOsc2=null}
+_rbGain=null;_rbMode=null;
+}
+function warmRingback(){
+if(!_rbCtx||_rbCtx.state==='closed')_rbCtx=new(window.AudioContext||window.webkitAudioContext)();
+if(_rbCtx.state==='suspended')_rbCtx.resume();
+}
+function startRingback(){
+stopRingback();
+if(_rbAudio){
+_rbAudio.currentTime=0;
+_rbAudio.play().then(()=>{_rbMode='audio'}).catch(()=>{_rbOscStart()});
+}else{_rbOscStart()}
+}
+function stopRingback(){
+if(_rbMode==='audio'&&_rbAudio){_rbAudio.pause();_rbAudio.currentTime=0}
+if(_rbMode==='osc')_rbOscStop();
+_rbMode=null;
+}
 
 /* dialer */
 let ws=null,player=null,micStream=null,micProc=null,micCtx=null,micOn=false;
@@ -2746,12 +2772,14 @@ renderP1Table();
 }
 
 /* p1 audio — ring-buffer playback with low-pass filter */
+let _p1Reset=null;
 function startP1Audio(){
 stopP1Audio();
 const proto=location.protocol==='https:'?'wss:':'ws:';
 p1AudioWs=new WebSocket(proto+'//'+location.host+'/ws/p1audio');
 p1AudioWs.binaryType='arraybuffer';
 p1Ctx=new AudioContext();
+if(p1Ctx.state==='suspended')p1Ctx.resume().catch(()=>{});
 const SR=p1Ctx.sampleRate;
 const RATIO=SR/8000;
 const ULAW=new Float32Array(256);
@@ -2762,6 +2790,8 @@ const ringOut=new Float32Array(RING);
 let riW=0,riR=0,roW=0,roR=0;
 let inPh=0,outPh=0;
 function avail(w,r){return(w-r+RING)%RING}
+function resetRings(){ringIn.fill(0);ringOut.fill(0);riW=riR=roW=roR=0;inPh=outPh=0}
+_p1Reset=resetRings;
 const lpf=p1Ctx.createBiquadFilter();
 lpf.type='lowpass';lpf.frequency.value=3400;lpf.Q.value=0.707;
 const lpf2=p1Ctx.createBiquadFilter();
@@ -2788,8 +2818,12 @@ p1AudioWs.onmessage=function(ev){
 if(!(ev.data instanceof ArrayBuffer)||p1Muted)return;
 const raw=new Uint8Array(ev.data);if(raw.length<2)return;
 const dir=raw[0];const ulaw=raw.subarray(1);
-if(dir===1){for(let i=0;i<ulaw.length;i++){ringOut[roW]=ULAW[ulaw[i]];roW=(roW+1)%RING}}
-else{for(let i=0;i<ulaw.length;i++){ringIn[riW]=ULAW[ulaw[i]];riW=(riW+1)%RING}}};
+if(dir===1){
+if(avail(roW,roR)>RING-ulaw.length-100){roR=roW;outPh=0}
+for(let i=0;i<ulaw.length;i++){ringOut[roW]=ULAW[ulaw[i]];roW=(roW+1)%RING}}
+else{
+if(avail(riW,riR)>RING-ulaw.length-100){riR=riW;inPh=0}
+for(let i=0;i<ulaw.length;i++){ringIn[riW]=ULAW[ulaw[i]];riW=(riW+1)%RING}}};
 p1AudioWs.onerror=function(){};p1AudioWs.onclose=function(){p1AudioWs=null};
 p1Proc=proc;
 }
@@ -2802,7 +2836,8 @@ btn.classList.toggle('muted',p1Muted);
 function stopP1Audio(){
 if(p1AudioWs){try{p1AudioWs.close()}catch(e){}}p1AudioWs=null;
 if(p1Proc){try{p1Proc.disconnect()}catch(e){}}p1Proc=null;
-if(p1Ctx){try{p1Ctx.close()}catch(e){}}p1Ctx=null}
+if(p1Ctx){try{p1Ctx.close()}catch(e){}}p1Ctx=null;
+_p1Reset=null}
 
 /* agent clock-in */
 function toggleClockIn(){
@@ -2905,6 +2940,7 @@ $('p1-pulse').style.display=d.msg==='ready'?'none':'';
 });
 sse.addEventListener('call_start',e=>{
 const d=JSON.parse(e.data);
+if(_p1Reset)_p1Reset();
 $('p1-start').disabled=true;$('p1-start').textContent='calling '+d.i+'/'+d.n;
 const row=p1Rows.find(r=>r.number===d.number&&r.status==='pending');
 if(row){row.status='calling';row.time=d.ts}
@@ -2912,6 +2948,7 @@ updateP1Stats();renderP1Table();
 });
 sse.addEventListener('call_end',e=>{
 const d=JSON.parse(e.data);
+if(_p1Reset)_p1Reset();
 const row=p1Rows.find(r=>r.number===d.number&&r.status==='calling');
 if(row){row.status=d.status;row.dtmf=d.dtmf||'';row.time=d.ts}
 updateP1Stats();renderP1Table();loadStats();
