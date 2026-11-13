@@ -2411,11 +2411,17 @@ src.start(this.nt);this.nt+=fl.length/8000;
 close(){try{this.ctx.close()}catch(e){}}
 }
 
-/* ringback tone — US standard 440+480Hz, 2s on / 4s off */
+/* ringback tone — US standard 440+480Hz, 2s on / 4s off
+   pre-warm AudioContext from user gesture so autoplay policy allows it */
 let _rbCtx=null,_rbOsc1=null,_rbOsc2=null,_rbGain=null,_rbIv=null;
+function warmRingback(){
+if(!_rbCtx||_rbCtx.state==='closed'){_rbCtx=new(window.AudioContext||window.webkitAudioContext)()}
+if(_rbCtx.state==='suspended')_rbCtx.resume();
+}
 function startRingback(){
 stopRingback();
-_rbCtx=new(window.AudioContext||window.webkitAudioContext)();
+if(!_rbCtx||_rbCtx.state==='closed'){_rbCtx=new(window.AudioContext||window.webkitAudioContext)()}
+if(_rbCtx.state==='suspended')_rbCtx.resume();
 _rbGain=_rbCtx.createGain();_rbGain.gain.value=0.15;_rbGain.connect(_rbCtx.destination);
 _rbOsc1=_rbCtx.createOscillator();_rbOsc1.frequency.value=440;_rbOsc1.connect(_rbGain);_rbOsc1.start();
 _rbOsc2=_rbCtx.createOscillator();_rbOsc2.frequency.value=480;_rbOsc2.connect(_rbGain);_rbOsc2.start();
@@ -2426,7 +2432,6 @@ function stopRingback(){
 if(_rbOsc1){try{_rbOsc1.stop()}catch(e){}_rbOsc1=null}
 if(_rbOsc2){try{_rbOsc2.stop()}catch(e){}_rbOsc2=null}
 if(_rbGain){_rbGain=null}
-if(_rbCtx){try{_rbCtx.close()}catch(e){}_rbCtx=null}
 if(_rbIv){clearTimeout(_rbIv);_rbIv=null}
 }
 
@@ -2451,15 +2456,16 @@ function redial(num){$('dial-num').value=num;dial()}
 
 function dial(){
 const num=$('dial-num').value.trim();if(!num)return;
+warmRingback();startRingback();
 fetch('/api/dial',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({number:num,...sipCfg()})})
 .then(r=>r.json()).then(d=>{
-if(d.error){alert(d.error);return}
+if(d.error){stopRingback();alert(d.error);return}
 $('dial-idle').style.display='none';$('dial-active').style.display='';
-$('dial-st').textContent='connecting...';
+$('dial-st').textContent='dialing...';
 $('call-timer').textContent='';
 $('dial-num').disabled=true;
 connectAudio();
-}).catch(e=>alert(e));
+}).catch(e=>{stopRingback();alert(e)});
 }
 
 function connectAudio(){
@@ -2976,6 +2982,7 @@ renderADTable();
 function startAD(){
 const nums=$('ad-numbers').value.trim();
 if(!nums){alert('add numbers first');return}
+warmRingback();
 $('ad-start').disabled=true;$('ad-start').textContent='starting...';
 $('ad-stop').disabled=false;$('ad-next').disabled=false;
 adRunning=true;

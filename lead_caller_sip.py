@@ -758,15 +758,16 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
     Sets disconnect_evt if no RTP received for 8s.
     Sets screening_flag[0]=True if AMD detects machine.
     Sets voicemail_evt if AMD detects machine (same signal, separate event)."""
-    # AMD parameters — Asterisk-proven defaults adapted for ulaw
-    AMD_INITIAL_SILENCE = 2.5
-    AMD_GREETING_MAX = 1.5
-    AMD_AFTER_GREETING_SILENCE = 0.8
-    AMD_MAX_WORDS = 3
-    AMD_BETWEEN_WORDS = 0.05
-    AMD_MIN_WORD = 0.1
-    AMD_TOTAL_ANALYSIS = 5.0
-    AMD_ENERGY_THRESH = 8
+    # AMD parameters — Asterisk-derived, tuned for ulaw over SIP
+    AMD_GRACE_PERIOD = 1.0
+    AMD_INITIAL_SILENCE = 3.5
+    AMD_GREETING_MAX = 3.0
+    AMD_AFTER_GREETING_SILENCE = 1.0
+    AMD_MAX_WORDS = 5
+    AMD_BETWEEN_WORDS = 0.08
+    AMD_MIN_WORD = 0.12
+    AMD_TOTAL_ANALYSIS = 5.5
+    AMD_ENERGY_THRESH = 18
 
     seen_ts = set()
     buf = bytearray()
@@ -836,7 +837,7 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
             now = time.time()
             elapsed = now - start_time
 
-            if not amd_decided and elapsed < AMD_TOTAL_ANALYSIS:
+            if not amd_decided and elapsed < AMD_TOTAL_ANALYSIS and elapsed > AMD_GRACE_PERIOD:
                 energy = sum(abs(b - 128) for b in payload) / max(len(payload), 1)
                 is_speech = energy > AMD_ENERGY_THRESH
 
@@ -884,9 +885,10 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
 # ── RTP streamer ──────────────────────────────────────────────
 
 def stream_rtp(rtp_sock, remote_addr, ulaw_data: bytes, pause_sec: int,
-               digits_list=None, audio_cb=None, disconnect_evt=None, stop_event=None):
+               digits_list=None, audio_cb=None, disconnect_evt=None, stop_event=None,
+               voicemail_evt=None):
     """Stream silence (pause) then ulaw audio as RTP packets. Returns when done.
-    If disconnect_evt or stop_event is set externally, stops early."""
+    If disconnect_evt, stop_event, or voicemail_evt is set externally, stops early."""
     ssrc = random.getrandbits(32)
     seq = random.randint(0, 0xFFFF)
     timestamp = 0
@@ -897,7 +899,7 @@ def stream_rtp(rtp_sock, remote_addr, ulaw_data: bytes, pause_sec: int,
     pause_frames = (pause_sec * SAMPLE_RATE) // FRAME_SIZE
     print(f"  [+] sending {pause_sec}s silence ({pause_frames} frames) ...")
     for _ in range(pause_frames):
-        if (disconnect_evt and disconnect_evt.is_set()) or (stop_event and stop_event.is_set()):
+        if (disconnect_evt and disconnect_evt.is_set()) or (stop_event and stop_event.is_set()) or (voicemail_evt and voicemail_evt.is_set()):
             print("  [!] stopped during pause — aborting stream")
             return seq, timestamp, ssrc
         pkt = build_rtp_packet(silence, seq, timestamp, ssrc, pt)
@@ -909,7 +911,7 @@ def stream_rtp(rtp_sock, remote_addr, ulaw_data: bytes, pause_sec: int,
     print(f"  [+] streaming audio ({len(ulaw_data) / SAMPLE_RATE:.1f}s) ...")
     offset = 0
     while offset < len(ulaw_data):
-        if (disconnect_evt and disconnect_evt.is_set()) or (stop_event and stop_event.is_set()):
+        if (disconnect_evt and disconnect_evt.is_set()) or (stop_event and stop_event.is_set()) or (voicemail_evt and voicemail_evt.is_set()):
             print("  [!] stopped during audio — aborting stream")
             return seq, timestamp, ssrc
         chunk = ulaw_data[offset:offset + FRAME_SIZE]
@@ -927,7 +929,7 @@ def stream_rtp(rtp_sock, remote_addr, ulaw_data: bytes, pause_sec: int,
     print("  [+] audio done, listening for DTMF (10s) ...")
     listen_frames = (10 * SAMPLE_RATE) // FRAME_SIZE
     for _ in range(listen_frames):
-        if (disconnect_evt and disconnect_evt.is_set()) or (stop_event and stop_event.is_set()):
+        if (disconnect_evt and disconnect_evt.is_set()) or (stop_event and stop_event.is_set()) or (voicemail_evt and voicemail_evt.is_set()):
             break
         pkt = build_rtp_packet(silence, seq, timestamp, ssrc, pt)
         rtp_sock.sendto(pkt, remote_addr)
@@ -1208,21 +1210,13 @@ def do_direct_call(server, port, username, password, caller_id, number,
                 )
                 dtmf_thread.start()
 
-                if voicemail_evt.wait(timeout=4.0):
-                    print("  [!] voicemail detected — hanging up")
-                    dtmf_stop.set()
-                    dtmf_thread.join(timeout=1)
-                    try: sip.send_bye(ctx)
-                    except Exception: pass
-                    rtp_sock.close()
-                    return "voicemail"
-
                 if ulaw_data:
                     rtp_state = stream_rtp(rtp_sock, remote_rtp, ulaw_data,
                                            pause_sec, digits_list=digits,
                                            audio_cb=audio_out_monitor_cb,
                                            disconnect_evt=disconnect_evt,
-                                           stop_event=stop_event)
+                                           stop_event=stop_event,
+                                           voicemail_evt=voicemail_evt)
                 else:
                     time.sleep(5)
                     rtp_state = None
@@ -1235,6 +1229,15 @@ def do_direct_call(server, port, username, password, caller_id, number,
                     except Exception: pass
                     rtp_sock.close()
                     return "cancelled"
+
+                if voicemail_evt.is_set():
+                    print("  [direct] voicemail detected — hanging up")
+                    dtmf_stop.set()
+                    dtmf_thread.join(timeout=1)
+                    try: sip.send_bye(ctx)
+                    except Exception: pass
+                    rtp_sock.close()
+                    return "voicemail"
 
                 if disconnect_evt.is_set():
                     print("  [direct] call disconnected mid-stream")
@@ -1409,21 +1412,13 @@ def do_call(server, port, username, password, caller_id, number,
                 )
                 dtmf_thread.start()
 
-                if voicemail_evt.wait(timeout=4.0):
-                    print("  [!] voicemail detected — hanging up")
-                    dtmf_stop.set()
-                    dtmf_thread.join(timeout=1)
-                    try: sip.send_bye(ctx)
-                    except Exception: pass
-                    rtp_sock.close()
-                    return "voicemail"
-
                 if ulaw_data:
                     rtp_state = stream_rtp(rtp_sock, remote_rtp, ulaw_data,
                                            pause_sec, digits_list=digits,
                                            audio_cb=audio_out_cb,
                                            disconnect_evt=disconnect_evt,
-                                           stop_event=stop_event)
+                                           stop_event=stop_event,
+                                           voicemail_evt=voicemail_evt)
                 else:
                     print("  [+] no message, holding 5s ...")
                     time.sleep(5)
@@ -1437,6 +1432,15 @@ def do_call(server, port, username, password, caller_id, number,
                     except Exception: pass
                     rtp_sock.close()
                     return "cancelled"
+
+                if voicemail_evt.is_set():
+                    print("  [!] voicemail detected — hanging up")
+                    dtmf_stop.set()
+                    dtmf_thread.join(timeout=1)
+                    try: sip.send_bye(ctx)
+                    except Exception: pass
+                    rtp_sock.close()
+                    return "voicemail"
 
                 if disconnect_evt.is_set():
                     print("  [!] call disconnected mid-stream")
