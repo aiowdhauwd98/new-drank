@@ -752,17 +752,54 @@ DTMF_EVENTS = {
 }
 
 def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
-                   disconnect_evt=None, screening_flag=None):
+                   disconnect_evt=None, screening_flag=None, voicemail_evt=None):
     """Background thread: receives RTP, detects RFC 4733 DTMF events.
     If audio_cb is set, forwards non-DTMF audio payloads to it.
     Sets disconnect_evt if no RTP received for 8s.
-    Sets screening_flag[0]=True if heavy incoming audio detected in first 3s."""
+    Sets screening_flag[0]=True if AMD detects machine.
+    Sets voicemail_evt if AMD detects machine (same signal, separate event)."""
+    # AMD parameters — Asterisk-proven defaults adapted for ulaw
+    AMD_INITIAL_SILENCE = 2.5
+    AMD_GREETING_MAX = 1.5
+    AMD_AFTER_GREETING_SILENCE = 0.8
+    AMD_MAX_WORDS = 3
+    AMD_BETWEEN_WORDS = 0.05
+    AMD_MIN_WORD = 0.1
+    AMD_TOTAL_ANALYSIS = 5.0
+    AMD_ENERGY_THRESH = 8
+
     seen_ts = set()
     buf = bytearray()
     last_flush = time.time()
     last_rtp_time = time.time()
     start_time = time.time()
-    early_audio_bytes = 0
+
+    amd_decided = False
+    amd_in_speech = False
+    amd_first_speech = None
+    amd_word_start = None
+    amd_silence_start = None
+    amd_word_count = 0
+    amd_speech_end = None
+
+    def amd_machine(reason):
+        nonlocal amd_decided
+        if amd_decided:
+            return
+        amd_decided = True
+        print(f"  [AMD] MACHINE — {reason}")
+        if screening_flag is not None:
+            screening_flag[0] = True
+        if voicemail_evt:
+            voicemail_evt.set()
+
+    def amd_human(reason):
+        nonlocal amd_decided
+        if amd_decided:
+            return
+        amd_decided = True
+        print(f"  [AMD] HUMAN — {reason}")
+
     while not stop_evt.is_set():
         try:
             data, _ = rtp_sock.recvfrom(4096)
@@ -796,16 +833,44 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
                 print(f"  [DTMF] '{digit}' detected")
         elif len(data) > 12:
             payload = data[12:]
-            if screening_flag is not None and not screening_flag[0] and time.time() - start_time < 2.0:
-                energy = sum(abs(b - 128) for b in payload)
-                if energy > len(payload) * 12:
-                    early_audio_bytes += len(payload)
-                    if early_audio_bytes > 12000:
-                        screening_flag[0] = True
-                        print("  [!] screening detected — sustained automated audio in first 2s")
+            now = time.time()
+            elapsed = now - start_time
+
+            if not amd_decided and elapsed < AMD_TOTAL_ANALYSIS:
+                energy = sum(abs(b - 128) for b in payload) / max(len(payload), 1)
+                is_speech = energy > AMD_ENERGY_THRESH
+
+                if is_speech:
+                    if not amd_in_speech:
+                        amd_in_speech = True
+                        amd_word_start = now
+                        if amd_first_speech is None:
+                            amd_first_speech = now
+                            if now - start_time > AMD_INITIAL_SILENCE:
+                                amd_machine(f"initial silence {now - start_time:.1f}s")
+                    amd_silence_start = None
+                    if amd_word_start and now - amd_word_start > AMD_GREETING_MAX:
+                        amd_machine(f"greeting {now - amd_word_start:.1f}s")
+                else:
+                    if amd_in_speech:
+                        if amd_silence_start is None:
+                            amd_silence_start = now
+                            amd_speech_end = now
+                        elif now - amd_silence_start > AMD_BETWEEN_WORDS:
+                            if amd_word_start and amd_speech_end and amd_speech_end - amd_word_start >= AMD_MIN_WORD:
+                                amd_word_count += 1
+                                if amd_word_count > AMD_MAX_WORDS:
+                                    amd_machine(f"{amd_word_count} words")
+                            amd_in_speech = False
+                            amd_word_start = None
+                    if amd_first_speech and amd_silence_start:
+                        if now - amd_silence_start > AMD_AFTER_GREETING_SILENCE:
+                            amd_human(f"silence after greeting {now - amd_silence_start:.1f}s")
+            elif not amd_decided and elapsed >= AMD_TOTAL_ANALYSIS:
+                amd_human("analysis timeout — defaulting to human")
+
             if audio_cb:
                 buf.extend(payload)
-                now = time.time()
                 if now - last_flush >= 0.16 or len(buf) >= 1280:
                     try: audio_cb(bytes(buf))
                     except Exception: pass
@@ -1130,16 +1195,27 @@ def do_direct_call(server, port, username, password, caller_id, number,
             if code == 200 and remote_rtp:
                 digits = []
                 disconnect_evt = threading.Event()
+                voicemail_evt = threading.Event()
                 screening_flag = [False]
                 dtmf_stop = threading.Event()
                 dtmf_thread = threading.Thread(
                     target=dtmf_listener,
                     args=(rtp_sock, dtmf_stop, digits),
                     kwargs={"audio_cb": audio_cb, "disconnect_evt": disconnect_evt,
-                            "screening_flag": screening_flag},
+                            "screening_flag": screening_flag,
+                            "voicemail_evt": voicemail_evt},
                     daemon=True,
                 )
                 dtmf_thread.start()
+
+                if voicemail_evt.wait(timeout=4.0):
+                    print("  [!] voicemail detected — hanging up")
+                    dtmf_stop.set()
+                    dtmf_thread.join(timeout=1)
+                    try: sip.send_bye(ctx)
+                    except Exception: pass
+                    rtp_sock.close()
+                    return "voicemail"
 
                 if ulaw_data:
                     rtp_state = stream_rtp(rtp_sock, remote_rtp, ulaw_data,
@@ -1320,16 +1396,27 @@ def do_call(server, port, username, password, caller_id, number,
             if code == 200 and remote_rtp:
                 digits = []
                 disconnect_evt = threading.Event()
+                voicemail_evt = threading.Event()
                 screening_flag = [False]
                 dtmf_stop = threading.Event()
                 dtmf_thread = threading.Thread(
                     target=dtmf_listener,
                     args=(rtp_sock, dtmf_stop, digits),
                     kwargs={"audio_cb": audio_cb, "disconnect_evt": disconnect_evt,
-                            "screening_flag": screening_flag},
+                            "screening_flag": screening_flag,
+                            "voicemail_evt": voicemail_evt},
                     daemon=True,
                 )
                 dtmf_thread.start()
+
+                if voicemail_evt.wait(timeout=4.0):
+                    print("  [!] voicemail detected — hanging up")
+                    dtmf_stop.set()
+                    dtmf_thread.join(timeout=1)
+                    try: sip.send_bye(ctx)
+                    except Exception: pass
+                    rtp_sock.close()
+                    return "voicemail"
 
                 if ulaw_data:
                     rtp_state = stream_rtp(rtp_sock, remote_rtp, ulaw_data,

@@ -668,6 +668,9 @@ def run_calls(numbers, cfg, message, response_msg, voice, pause, user_id=None):
             if result == "answered":
                 entry["status"] = "answered"
                 push_event("p1_status", {"msg": f"{num} — answered"})
+            elif result == "voicemail":
+                entry["status"] = "voicemail"
+                push_event("p1_status", {"msg": f"{num} — voicemail, hung up"})
             elif result == "screening":
                 entry["status"] = "screening"
                 push_event("p1_status", {"msg": f"{num} — automated screening detected"})
@@ -813,6 +816,9 @@ def run_direct_calls(numbers, cfg, message, voice, pause, trigger_digit,
             elif result == "disconnected":
                 entry["status"] = "disconnected"
                 push_event("p1_status", {"msg": f"{num} — call disconnected"})
+            elif result == "voicemail":
+                entry["status"] = "voicemail"
+                push_event("p1_status", {"msg": f"{num} — voicemail, hung up"})
             elif result == "screening":
                 entry["status"] = "screening"
                 push_event("p1_status", {"msg": f"{num} — automated screening detected"})
@@ -965,6 +971,7 @@ def run_auto_dial_calls(numbers, cfg, max_duration, user_id=None):
                     ad_active_sip[0] = sip
                     digits = []
                     disconnect_evt = threading.Event()
+                    voicemail_evt = threading.Event()
                     screening_flag = [False]
                     dtmf_stop = threading.Event()
                     dtmf_thread = threading.Thread(
@@ -972,7 +979,8 @@ def run_auto_dial_calls(numbers, cfg, max_duration, user_id=None):
                         args=(rtp_sock, dtmf_stop, digits),
                         kwargs={"audio_cb": _ad_audio_in,
                                 "disconnect_evt": disconnect_evt,
-                                "screening_flag": screening_flag},
+                                "screening_flag": screening_flag,
+                                "voicemail_evt": voicemail_evt},
                         daemon=True,
                     )
                     dtmf_thread.start()
@@ -987,6 +995,8 @@ def run_auto_dial_calls(numbers, cfg, max_duration, user_id=None):
                         if ad_stop_event.is_set() or ad_next_event.is_set():
                             break
                         if disconnect_evt.is_set():
+                            break
+                        if voicemail_evt.is_set():
                             break
                         if time.time() - call_start > max_duration:
                             break
@@ -1008,7 +1018,10 @@ def run_auto_dial_calls(numbers, cfg, max_duration, user_id=None):
 
                     if digits:
                         entry["dtmf"] = "".join(digits)
-                    if disconnect_evt.is_set():
+                    if voicemail_evt.is_set():
+                        entry["status"] = "voicemail"
+                        push_event("ad_status", {"msg": f"{num} — voicemail, hung up"})
+                    elif disconnect_evt.is_set():
                         entry["status"] = "disconnected"
                         push_event("ad_status", {"msg": f"{num} — disconnected"})
                     else:
@@ -2398,6 +2411,25 @@ src.start(this.nt);this.nt+=fl.length/8000;
 close(){try{this.ctx.close()}catch(e){}}
 }
 
+/* ringback tone — US standard 440+480Hz, 2s on / 4s off */
+let _rbCtx=null,_rbOsc1=null,_rbOsc2=null,_rbGain=null,_rbIv=null;
+function startRingback(){
+stopRingback();
+_rbCtx=new(window.AudioContext||window.webkitAudioContext)();
+_rbGain=_rbCtx.createGain();_rbGain.gain.value=0.15;_rbGain.connect(_rbCtx.destination);
+_rbOsc1=_rbCtx.createOscillator();_rbOsc1.frequency.value=440;_rbOsc1.connect(_rbGain);_rbOsc1.start();
+_rbOsc2=_rbCtx.createOscillator();_rbOsc2.frequency.value=480;_rbOsc2.connect(_rbGain);_rbOsc2.start();
+function cycle(){_rbIv=setTimeout(()=>{if(!_rbGain)return;_rbGain.gain.value=0;_rbIv=setTimeout(()=>{if(!_rbGain)return;_rbGain.gain.value=0.15;cycle()},4000)},2000)}
+cycle();
+}
+function stopRingback(){
+if(_rbOsc1){try{_rbOsc1.stop()}catch(e){}_rbOsc1=null}
+if(_rbOsc2){try{_rbOsc2.stop()}catch(e){}_rbOsc2=null}
+if(_rbGain){_rbGain=null}
+if(_rbCtx){try{_rbCtx.close()}catch(e){}_rbCtx=null}
+if(_rbIv){clearTimeout(_rbIv);_rbIv=null}
+}
+
 /* dialer */
 let ws=null,player=null,micStream=null,micProc=null,micCtx=null,micOn=false;
 let _callTimer=null,_callStart=0;
@@ -2438,10 +2470,10 @@ player=new Player();
 ws.onmessage=e=>{
 if(e.data instanceof ArrayBuffer){player.feed(new Uint8Array(e.data))}
 else{const m=JSON.parse(e.data);
-if(m.type==='connected'){$('dial-st').textContent='picked up';$('dial-st').style.color='var(--ac)';startCallTimer();if(!micOn){startMic();micOn=true;$('mic-btn').textContent='mic on';$('mic-btn').classList.add('on')}}
-else if(m.type==='status'){$('dial-st').textContent=m.text;$('dial-st').style.color='var(--dm)'}
+if(m.type==='connected'){stopRingback();$('dial-st').textContent='picked up';$('dial-st').style.color='var(--ac)';startCallTimer();if(!micOn){startMic();micOn=true;$('mic-btn').textContent='mic on';$('mic-btn').classList.add('on')}}
+else if(m.type==='status'){$('dial-st').textContent=m.text;$('dial-st').style.color='var(--dm)';if(m.text&&m.text.indexOf('ringing')>=0)startRingback()}
 else if(m.type==='ended'||m.type==='error'){
-stopCallTimer();
+stopRingback();stopCallTimer();
 const dur=$('call-timer').textContent;
 $('dial-st').textContent=(m.text||'hung up')+(dur?' - '+dur:'');
 $('dial-st').style.color=m.type==='error'?'var(--er)':'var(--dm)';
@@ -2649,7 +2681,7 @@ if(!show.length){$('p1-empty').style.display='';$('p1-empty').textContent='no ma
 $('p1-empty').style.display='none';
 show.forEach(r=>{
 const tr=document.createElement('tr');
-const sc=r.status==='answered'?'s-ok':r.status==='screening'?'s-warn':r.status==='disconnected'?'s-fail':r.status==='failed'?'s-fail':r.status==='calling'?'s-call':'s-pending';
+const sc=r.status==='answered'?'s-ok':r.status==='screening'?'s-warn':r.status==='voicemail'?'s-warn':r.status==='disconnected'?'s-fail':r.status==='failed'?'s-fail':r.status==='calling'?'s-call':'s-pending';
 tr.innerHTML='<td class="num">'+r.number+'</td><td class="'+sc+'">'+r.status+'</td><td>'+(r.dtmf||'—')+'</td><td>'+(r.dur||'—')+'</td><td>'+(r.time||'—')+'</td>';
 tb.appendChild(tr);
 });
@@ -2910,6 +2942,7 @@ if(r.status==='pending')pending++;
 else if(r.status==='calling')dialing++;
 else if(r.status==='answered'){answered++;dialing++}
 else if(r.status==='disconnected'){completed++}
+else if(r.status==='voicemail'){failed++;completed++}
 else if(r.status==='failed'){failed++;completed++}
 });
 $('ad-pending').textContent=pending;$('ad-dialing').textContent=dialing;
@@ -2927,7 +2960,7 @@ if(!show.length){$('ad-empty').style.display='';$('ad-empty').textContent='no ma
 $('ad-empty').style.display='none';
 show.forEach(r=>{
 const tr=document.createElement('tr');
-const sc=r.status==='answered'?'color:var(--ac)':r.status==='failed'||r.status==='disconnected'?'color:var(--er)':r.status==='calling'?'color:var(--wn)':'';
+const sc=r.status==='answered'?'color:var(--ac)':r.status==='voicemail'?'color:var(--wn)':r.status==='failed'||r.status==='disconnected'?'color:var(--er)':r.status==='calling'?'color:var(--wn)':'';
 tr.innerHTML='<td>'+r.number+'</td><td style="'+sc+'">'+r.status+'</td><td>'+r.dtmf+'</td><td>'+r.dur+'</td><td>'+r.time+'</td>';
 tb.appendChild(tr);
 });
@@ -3026,22 +3059,25 @@ const d=JSON.parse(e.data);
 $('ad-start').disabled=true;$('ad-start').textContent='calling '+d.i+'/'+d.n;
 const row=adRows.find(r=>r.number===d.number&&r.status==='pending');
 if(row){row.status='calling';row.time=d.ts}
+startRingback();
 updateADStats();renderADTable();
 });
 sse.addEventListener('ad_answered',e=>{
 const d=JSON.parse(e.data);
+stopRingback();
 const row=adRows.find(r=>r.number===d.number&&r.status==='calling');
 if(row){row.status='answered';row.time=d.ts}
 updateADStats();renderADTable();
 });
 sse.addEventListener('ad_end',e=>{
 const d=JSON.parse(e.data);
+stopRingback();
 const row=adRows.find(r=>r.number===d.number&&(r.status==='calling'||r.status==='answered'));
 if(row){row.status=d.status;row.dtmf=d.dtmf||'';row.time=d.ts}
 updateADStats();renderADTable();loadStats();
 });
 sse.addEventListener('ad_done',()=>{
-resetADButtons();loadHistory();stopADAudio();
+stopRingback();resetADButtons();loadHistory();stopADAudio();
 $('ad-status-msg').textContent='ready';$('ad-pulse').style.display='none';
 });
 
