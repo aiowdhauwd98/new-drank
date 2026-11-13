@@ -2541,10 +2541,27 @@ connectAudio();
 }
 
 function connectAudio(){
+if(ws){try{ws.close()}catch(e){}}
+if(player){try{player.close()}catch(e){}}
 const proto=location.protocol==='https:'?'wss':'ws';
 ws=new WebSocket(proto+'://'+location.host+'/ws/audio');
 ws.binaryType='arraybuffer';
 player=new Player();
+if(player.ctx.state==='suspended'){
+const hint=document.createElement('div');
+hint.id='audio-hint';
+hint.textContent='click anywhere to hear audio';
+hint.style.cssText='position:fixed;top:0;left:0;right:0;padding:8px;background:var(--ac);color:#000;text-align:center;font-size:13px;cursor:pointer;z-index:9999;font-weight:600';
+document.body.appendChild(hint);
+function unlock(){
+if(player&&player.ctx.state==='suspended')player.ctx.resume();
+const h=document.getElementById('audio-hint');if(h)h.remove();
+document.removeEventListener('click',unlock,true);
+document.removeEventListener('touchstart',unlock,true);
+}
+document.addEventListener('click',unlock,true);
+document.addEventListener('touchstart',unlock,true);
+}
 ws.onmessage=e=>{
 if(e.data instanceof ArrayBuffer){player.feed(new Uint8Array(e.data))}
 else{const m=JSON.parse(e.data);
@@ -2570,6 +2587,7 @@ function hangup(){fetch('/api/hangup',{method:'POST'})}
 
 function resetDialer(){
 stopRingback();stopCallTimer();stopMic();if(ws){try{ws.close()}catch(e){}}ws=null;if(player){try{player.close()}catch(e){}}player=null;
+const ah=document.getElementById('audio-hint');if(ah)ah.remove();
 $('dial-idle').style.display='';$('dial-active').style.display='none';
 $('dial-num').disabled=false;$('dial-st').textContent='';$('call-timer').textContent='';
 micOn=false;$('mic-btn').textContent='mic off';$('mic-btn').classList.remove('on');
