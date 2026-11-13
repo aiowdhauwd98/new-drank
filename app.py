@@ -865,78 +865,14 @@ def run_direct_calls(numbers, cfg, message, voice, pause, trigger_digit,
         push_event("batch_done", {"n": len(numbers), "error": str(e)})
 
 
-# ── Auto Dialer (batch dial + soundboard) ────────────────────
+# ── Auto Dialer ───────────────────────────────────────────────
 
 ad_stop_event = threading.Event()
 ad_next_event = threading.Event()
-ad_soundboard_q = queue.Queue()
 ad_batch_state = {"running": False, "rows": [], "status_msg": "ready", "current_idx": -1}
 ad_active_sip = [None]
 ad_ws_clients = []
 ad_ws_lock = threading.Lock()
-
-
-def _gen_tone(freqs, duration, amplitude=4000):
-    sr = 8000
-    out = bytearray()
-    ns = int(sr * duration)
-    fade = int(sr * 0.008)
-    for i in range(ns):
-        env = 1.0
-        if i < fade:
-            env = i / fade
-        elif i > ns - fade:
-            env = (ns - i) / fade
-        val = 0
-        for f in freqs:
-            val += math.sin(2 * math.pi * f * i / sr)
-        s = int(env * amplitude * val / max(len(freqs), 1))
-        out.append(_linear_to_ulaw(s))
-    return bytes(out)
-
-
-def _gen_sweep(f_start, f_end, duration, amplitude=4000):
-    sr = 8000
-    out = bytearray()
-    ns = int(sr * duration)
-    fade = int(sr * 0.008)
-    for i in range(ns):
-        t = i / ns
-        freq = f_start + (f_end - f_start) * t
-        env = 1.0
-        if i < fade:
-            env = i / fade
-        elif i > ns - fade:
-            env = (ns - i) / fade
-        s = int(env * amplitude * math.sin(2 * math.pi * freq * i / sr))
-        out.append(_linear_to_ulaw(s))
-    return bytes(out)
-
-
-def _build_soundboard():
-    sb = {}
-    snd = Path(__file__).parent / "sounds"
-    clips = {
-        "hold_music": "hold_music.ulaw",
-        "keypad_beep": "keypad_beep.ulaw",
-        "ring_back": "ring_back.ulaw",
-        "busy_signal": "busy_signal.ulaw",
-        "typing": "typing.ulaw",
-        "confirm": "confirm.ulaw",
-        "hangup": "hangup_beep.ulaw",
-        "hold_beep": "hold_beep.ulaw",
-        "outgoing": "outgoing.ulaw",
-    }
-    for name, fname in clips.items():
-        p = snd / fname
-        if p.exists():
-            sb[name] = p.read_bytes()
-        else:
-            sb[name] = _gen_tone([440], 0.5, 3000)
-    return sb
-
-
-SOUNDBOARD_CLIPS = _build_soundboard()
 
 
 def _ad_audio_send(raw):
@@ -969,12 +905,6 @@ def run_auto_dial_calls(numbers, cfg, max_duration, user_id=None):
     ad_batch_state["status_msg"] = "starting..."
     ad_batch_state["rows"] = [{"number": n, "status": "pending", "dtmf": "", "ts": ""} for n in numbers]
     ad_batch_state["current_idx"] = -1
-
-    while not ad_soundboard_q.empty():
-        try:
-            ad_soundboard_q.get_nowait()
-        except queue.Empty:
-            break
 
     try:
         local_ip = get_local_ip()
@@ -1025,7 +955,7 @@ def run_auto_dial_calls(numbers, cfg, max_duration, user_id=None):
                 if code == 200 and remote_rtp:
                     entry["status"] = "answered"
                     push_event("ad_answered", entry)
-                    push_event("ad_status", {"msg": f"{num} — connected (soundboard ready)"})
+                    push_event("ad_status", {"msg": f"{num} — connected"})
 
                     for r in ad_batch_state["rows"]:
                         if r["number"] == num:
@@ -1061,33 +991,11 @@ def run_auto_dial_calls(numbers, cfg, max_duration, user_id=None):
                         if time.time() - call_start > max_duration:
                             break
 
-                        sb_audio = None
-                        try:
-                            sb_audio = ad_soundboard_q.get_nowait()
-                        except queue.Empty:
-                            pass
-
-                        if sb_audio:
-                            offset = 0
-                            while offset < len(sb_audio):
-                                if ad_stop_event.is_set() or ad_next_event.is_set() or disconnect_evt.is_set():
-                                    break
-                                chunk = sb_audio[offset:offset + FRAME_SIZE]
-                                if len(chunk) < FRAME_SIZE:
-                                    chunk += bytes([0xFF] * (FRAME_SIZE - len(chunk)))
-                                pkt = build_rtp_packet(chunk, seq, timestamp, ssrc, 0)
-                                rtp_sock.sendto(pkt, remote_rtp)
-                                _ad_audio_out(chunk)
-                                seq = (seq + 1) & 0xFFFF
-                                timestamp += FRAME_SIZE
-                                offset += FRAME_SIZE
-                                time.sleep(0.02)
-                        else:
-                            pkt = build_rtp_packet(silence, seq, timestamp, ssrc, 0)
-                            rtp_sock.sendto(pkt, remote_rtp)
-                            seq = (seq + 1) & 0xFFFF
-                            timestamp += FRAME_SIZE
-                            time.sleep(0.02)
+                        pkt = build_rtp_packet(silence, seq, timestamp, ssrc, 0)
+                        rtp_sock.sendto(pkt, remote_rtp)
+                        seq = (seq + 1) & 0xFFFF
+                        timestamp += FRAME_SIZE
+                        time.sleep(0.02)
 
                     ad_active_sip[0] = None
                     dtmf_stop.set()
@@ -1507,37 +1415,6 @@ def api_auto_state():
     return jsonify(ad_batch_state)
 
 
-@app.route("/api/soundboard", methods=["POST"])
-@login_required
-def api_soundboard():
-    d = request.json or {}
-    clip = d.get("clip", "")
-    if clip == "custom_tts":
-        text = d.get("text", "").strip()
-        if not text:
-            return jsonify(error="no text"), 400
-        voice = d.get("voice", "en-US-AriaNeural")
-        try:
-            p = Path("_sb_tts.mp3")
-            generate_tts(text, voice, p)
-            ulaw = mp3_to_ulaw(p)
-            p.unlink(missing_ok=True)
-            ad_soundboard_q.put(ulaw)
-        except Exception as e:
-            return jsonify(error=str(e)[:60]), 500
-    elif clip in SOUNDBOARD_CLIPS:
-        ad_soundboard_q.put(SOUNDBOARD_CLIPS[clip])
-    else:
-        return jsonify(error="unknown clip"), 400
-    return jsonify(ok=True)
-
-
-@app.route("/api/soundboard-list")
-@login_required
-def api_soundboard_list():
-    return jsonify(list(SOUNDBOARD_CLIPS.keys()))
-
-
 # ── websocket ─────────────────────────────────────────────────
 
 @sock.route("/ws/adaudio")
@@ -1954,14 +1831,6 @@ hr.dv{border:none;border-top:1px solid var(--bd);margin:16px 0}
 .empty{color:var(--dm);font-size:.78rem;padding:8px 0}
 .redial{background:none;border:none;cursor:pointer;padding:2px;color:var(--dm);transition:color .15s;display:flex;align-items:center}
 .redial:hover{color:var(--ac)}
-.sb-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:10px}
-.sb-btn{background:var(--card);border:1px solid var(--bd);border-radius:6px;padding:8px 4px;cursor:pointer;text-align:center;transition:all .15s;color:var(--tx);font-family:inherit}
-.sb-btn:hover{border-color:#333;background:#161616}
-.sb-btn:active{transform:scale(.95);background:#1a1a1a}
-.sb-btn.playing{border-color:var(--ac);box-shadow:0 0 8px rgba(34,197,94,.2)}
-.sb-ico{display:block;font-size:1.1rem;margin-bottom:2px}
-.sb-name{font-size:.58rem;color:var(--dm);text-transform:uppercase;letter-spacing:.04em}
-.sb-tts{margin-top:8px;padding-top:8px;border-top:1px solid var(--bd)}
 .ad-dtmf-sec{margin-top:10px;padding-top:10px;border-top:1px solid var(--bd)}
 .ad-dtmf-head{font-size:.6rem;font-weight:600;color:var(--dm);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
 .ad-dtmf-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:4px}
@@ -2272,27 +2141,6 @@ hr.dv{border:none;border-top:1px solid var(--bd);margin:16px 0}
 </div>
 </div>
 
-<div class="p1-sec">
-<div class="p1-secn"><span class="n">3</span><span class="t">soundboard</span></div>
-<div class="sb-grid" id="sb-grid">
-<button class="sb-btn" data-clip="hold_music" onclick="playSB(this)"><span class="sb-ico">&#127925;</span><span class="sb-name">hold music</span></button>
-<button class="sb-btn" data-clip="keypad_beep" onclick="playSB(this)"><span class="sb-ico">&#128290;</span><span class="sb-name">keypad</span></button>
-<button class="sb-btn" data-clip="outgoing" onclick="playSB(this)"><span class="sb-ico">&#128257;</span><span class="sb-name">outgoing</span></button>
-<button class="sb-btn" data-clip="typing" onclick="playSB(this)"><span class="sb-ico">&#9000;</span><span class="sb-name">typing</span></button>
-<button class="sb-btn" data-clip="confirm" onclick="playSB(this)"><span class="sb-ico">&#9989;</span><span class="sb-name">confirm</span></button>
-<button class="sb-btn" data-clip="busy_signal" onclick="playSB(this)"><span class="sb-ico">&#10060;</span><span class="sb-name">busy</span></button>
-<button class="sb-btn" data-clip="hold_beep" onclick="playSB(this)"><span class="sb-ico">&#128276;</span><span class="sb-name">hold beep</span></button>
-<button class="sb-btn" data-clip="ring_back" onclick="playSB(this)"><span class="sb-ico">&#128222;</span><span class="sb-name">ring back</span></button>
-<button class="sb-btn" data-clip="hangup" onclick="playSB(this)"><span class="sb-ico">&#128683;</span><span class="sb-name">hang up</span></button>
-</div>
-<div class="sb-tts">
-<input id="sb-tts-text" placeholder="type anything to say..." style="margin-bottom:6px">
-<div class="row">
-<div style="flex:1"><select id="sb-voice"><option value="en-US-AriaNeural">Aria</option><option value="en-US-GuyNeural">Guy</option><option value="en-US-JennyNeural">Jenny</option><option value="en-US-DavisNeural">Davis</option></select></div>
-<div><button class="btn btn-sm" onclick="playSBTTS()">speak</button></div>
-</div>
-</div>
-</div>
 
 <div class="ad-dtmf-sec">
 <div class="ad-dtmf-head">dtmf keypad</div>
@@ -2481,7 +2329,6 @@ const btn=event.target;btn.textContent='copied!';setTimeout(()=>btn.textContent=
 
 /* device enumeration */
 async function loadDevices(){
-try{await navigator.mediaDevices.getUserMedia({audio:true}).then(s=>s.getTracks().forEach(t=>t.stop()))}catch(e){}
 const devs=await navigator.mediaDevices.enumerateDevices();
 const ms=$('mic-sel'),ss=$('spk-sel');
 ms.innerHTML='<option value="">default</option>';
@@ -3125,23 +2972,6 @@ $('ad-next').disabled=true;
 adRunning=false;
 }
 
-function playSB(btn){
-const clip=btn.dataset.clip;
-btn.classList.add('playing');
-fetch('/api/soundboard',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clip})})
-.then(r=>r.json()).then(d=>{if(d.error)console.warn(d.error)})
-.catch(()=>{});
-setTimeout(()=>btn.classList.remove('playing'),600);
-}
-
-function playSBTTS(){
-const text=$('sb-tts-text').value.trim();
-if(!text)return;
-const voice=$('sb-voice').value;
-fetch('/api/soundboard',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clip:'custom_tts',text,voice})})
-.then(r=>r.json()).then(d=>{if(d.error)alert(d.error)})
-.catch(()=>{});
-}
 
 function startADAudio(){
 stopADAudio();
