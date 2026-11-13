@@ -764,16 +764,16 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
     Sets disconnect_evt if no RTP received for 8s.
     Sets screening_flag[0]=True if AMD detects machine.
     Sets voicemail_evt if AMD detects machine (same signal, separate event)."""
-    # AMD parameters — Asterisk-derived, tuned for ulaw over SIP
-    AMD_GRACE_PERIOD = 1.5
-    AMD_INITIAL_SILENCE = 4.0
-    AMD_GREETING_MAX = 4.0
-    AMD_AFTER_GREETING_SILENCE = 1.2
-    AMD_MAX_WORDS = 6
-    AMD_BETWEEN_WORDS = 0.10
-    AMD_MIN_WORD = 0.12
-    AMD_TOTAL_ANALYSIS = 6.0
-    AMD_ENERGY_THRESH = 250
+    AMD_GRACE       = 1.5    # ignore connection artifacts
+    AMD_INIT_SIL    = 4.0    # no speech at all → machine (dead air pickup)
+    AMD_GREET_MAX   = 3.5    # total speech span first→last > this → machine
+    AMD_HUMAN_MAX   = 1.8    # speech span under this + silence → human
+    AMD_AFTER_SIL   = 1.2    # silence after speech ends before deciding
+    AMD_MAX_WORDS   = 5      # word count above this → machine
+    AMD_WORD_GAP    = 0.10   # silence between words
+    AMD_MIN_WORD    = 0.12   # minimum duration to count as a word
+    AMD_WINDOW      = 6.0    # total analysis window
+    AMD_ENERGY      = 250    # RMS threshold (decoded 16-bit PCM)
 
     seen_ts = set()
     buf = bytearray()
@@ -784,10 +784,10 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
     amd_decided = False
     amd_in_speech = False
     amd_first_speech = None
-    amd_word_start = None
+    amd_last_speech = None
+    amd_cur_word_start = None
     amd_silence_start = None
     amd_word_count = 0
-    amd_speech_end = None
 
     def amd_machine(reason):
         nonlocal amd_decided
@@ -843,39 +843,52 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
             now = time.time()
             elapsed = now - start_time
 
-            if not amd_decided and elapsed < AMD_TOTAL_ANALYSIS and elapsed > AMD_GRACE_PERIOD:
+            if not amd_decided and elapsed < AMD_WINDOW and elapsed > AMD_GRACE:
                 lin = audioop.ulaw2lin(payload, 2)
                 rms = audioop.rms(lin, 2)
-                is_speech = rms > AMD_ENERGY_THRESH
+                is_speech = rms > AMD_ENERGY
 
                 if is_speech:
+                    amd_last_speech = now
+                    amd_silence_start = None
                     if not amd_in_speech:
                         amd_in_speech = True
-                        amd_word_start = now
+                        amd_cur_word_start = now
                         if amd_first_speech is None:
                             amd_first_speech = now
-                            if now - start_time > AMD_INITIAL_SILENCE:
-                                amd_machine(f"initial silence {now - start_time:.1f}s")
-                    amd_silence_start = None
-                    if amd_word_start and now - amd_word_start > AMD_GREETING_MAX:
-                        amd_machine(f"greeting {now - amd_word_start:.1f}s")
+                            if elapsed > AMD_INIT_SIL:
+                                amd_machine(f"initial silence {elapsed:.1f}s")
+                    speech_span = now - amd_first_speech
+                    if speech_span > AMD_GREET_MAX:
+                        amd_machine(f"greeting span {speech_span:.1f}s")
                 else:
                     if amd_in_speech:
                         if amd_silence_start is None:
                             amd_silence_start = now
-                            amd_speech_end = now
-                        elif now - amd_silence_start > AMD_BETWEEN_WORDS:
-                            if amd_word_start and amd_speech_end and amd_speech_end - amd_word_start >= AMD_MIN_WORD:
+                        elif now - amd_silence_start > AMD_WORD_GAP:
+                            if amd_cur_word_start and now - amd_cur_word_start >= AMD_MIN_WORD:
                                 amd_word_count += 1
                                 if amd_word_count > AMD_MAX_WORDS:
                                     amd_machine(f"{amd_word_count} words")
                             amd_in_speech = False
-                            amd_word_start = None
+                            amd_cur_word_start = None
                     if amd_first_speech and amd_silence_start:
-                        if now - amd_silence_start > AMD_AFTER_GREETING_SILENCE:
-                            amd_human(f"silence after greeting {now - amd_silence_start:.1f}s")
-            elif not amd_decided and elapsed >= AMD_TOTAL_ANALYSIS:
-                amd_human("analysis timeout — defaulting to human")
+                        sil_dur = now - amd_silence_start
+                        if sil_dur > AMD_AFTER_SIL:
+                            speech_span = (amd_last_speech or now) - amd_first_speech
+                            if speech_span < AMD_HUMAN_MAX:
+                                amd_human(f"short greeting {speech_span:.1f}s + silence")
+                            else:
+                                amd_machine(f"long greeting {speech_span:.1f}s + silence")
+            elif not amd_decided and elapsed >= AMD_WINDOW:
+                if amd_first_speech:
+                    speech_span = (amd_last_speech or now) - amd_first_speech
+                    if speech_span > AMD_HUMAN_MAX:
+                        amd_machine(f"timeout with {speech_span:.1f}s speech")
+                    else:
+                        amd_human("timeout — short speech")
+                else:
+                    amd_machine("timeout — no speech detected")
 
             if audio_cb:
                 buf.extend(payload)
