@@ -70,6 +70,12 @@ def normalize_number(num: str) -> str:
     return num
 
 
+def is_us_number(num: str) -> bool:
+    """Check if a normalized number is a valid US number."""
+    n = normalize_number(num)
+    return len(n) == 11 and n.startswith("1") and n[1] in "2345678"
+
+
 def load_leads(path: str) -> list[str]:
     p = Path(path)
     numbers = []
@@ -759,15 +765,15 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
     Sets screening_flag[0]=True if AMD detects machine.
     Sets voicemail_evt if AMD detects machine (same signal, separate event)."""
     # AMD parameters — Asterisk-derived, tuned for ulaw over SIP
-    AMD_GRACE_PERIOD = 1.0
-    AMD_INITIAL_SILENCE = 3.5
-    AMD_GREETING_MAX = 3.0
-    AMD_AFTER_GREETING_SILENCE = 1.0
-    AMD_MAX_WORDS = 5
-    AMD_BETWEEN_WORDS = 0.08
+    AMD_GRACE_PERIOD = 1.5
+    AMD_INITIAL_SILENCE = 4.0
+    AMD_GREETING_MAX = 4.0
+    AMD_AFTER_GREETING_SILENCE = 1.2
+    AMD_MAX_WORDS = 6
+    AMD_BETWEEN_WORDS = 0.10
     AMD_MIN_WORD = 0.12
-    AMD_TOTAL_ANALYSIS = 5.5
-    AMD_ENERGY_THRESH = 18
+    AMD_TOTAL_ANALYSIS = 6.0
+    AMD_ENERGY_THRESH = 250
 
     seen_ts = set()
     buf = bytearray()
@@ -838,8 +844,9 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
             elapsed = now - start_time
 
             if not amd_decided and elapsed < AMD_TOTAL_ANALYSIS and elapsed > AMD_GRACE_PERIOD:
-                energy = sum(abs(b - 128) for b in payload) / max(len(payload), 1)
-                is_speech = energy > AMD_ENERGY_THRESH
+                lin = audioop.ulaw2lin(payload, 2)
+                rms = audioop.rms(lin, 2)
+                is_speech = rms > AMD_ENERGY_THRESH
 
                 if is_speech:
                     if not amd_in_speech:

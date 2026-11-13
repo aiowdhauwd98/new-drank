@@ -26,9 +26,9 @@ from werkzeug.security import generate_password_hash, check_password_hash
 
 import math
 from lead_caller_sip import (
-    generate_tts, mp3_to_ulaw, normalize_number, do_call, do_bridge_call,
-    do_direct_call, get_local_ip, SIPCall, build_rtp_packet, FRAME_SIZE,
-    dtmf_listener,
+    generate_tts, mp3_to_ulaw, normalize_number, is_us_number, do_call,
+    do_bridge_call, do_direct_call, get_local_ip, SIPCall,
+    build_rtp_packet, FRAME_SIZE, dtmf_listener,
 )
 
 app = Flask(__name__)
@@ -1179,6 +1179,8 @@ def api_dial():
     num = normalize_number(d.get("number", "").strip())
     if not num:
         return jsonify(error="invalid number"), 400
+    if not is_us_number(num):
+        return jsonify(error="us numbers only"), 400
     cfg = _build_sip_cfg(d)
     if not cfg["user"] or not cfg["password"]:
         return jsonify(error="sip credentials required"), 400
@@ -1206,8 +1208,9 @@ def api_call():
     if not raw:
         return jsonify(error="no numbers"), 400
     nums = [normalize_number(n.strip()) for n in raw.splitlines() if n.strip()]
+    nums = [n for n in nums if is_us_number(n)]
     if not nums:
-        return jsonify(error="no valid numbers"), 400
+        return jsonify(error="no valid us numbers"), 400
     cfg = _build_sip_cfg(d)
     if not cfg["user"] or not cfg["password"]:
         return jsonify(error="sip credentials required"), 400
@@ -1378,8 +1381,9 @@ def api_auto_call():
     if not raw:
         return jsonify(error="no numbers"), 400
     nums = [normalize_number(n.strip()) for n in raw.replace(",", "\n").splitlines() if n.strip()]
+    nums = [n for n in nums if is_us_number(n)]
     if not nums:
-        return jsonify(error="no valid numbers"), 400
+        return jsonify(error="no valid us numbers"), 400
     cfg = _build_sip_cfg(d)
     cfg["caller_id"] = d.get("caller_id") or cfg["caller_id"]
     if not cfg["user"] or not cfg["password"]:
@@ -2422,10 +2426,10 @@ function startRingback(){
 stopRingback();
 if(!_rbCtx||_rbCtx.state==='closed'){_rbCtx=new(window.AudioContext||window.webkitAudioContext)()}
 if(_rbCtx.state==='suspended')_rbCtx.resume();
-_rbGain=_rbCtx.createGain();_rbGain.gain.value=0.15;_rbGain.connect(_rbCtx.destination);
+_rbGain=_rbCtx.createGain();_rbGain.gain.value=0.35;_rbGain.connect(_rbCtx.destination);
 _rbOsc1=_rbCtx.createOscillator();_rbOsc1.frequency.value=440;_rbOsc1.connect(_rbGain);_rbOsc1.start();
 _rbOsc2=_rbCtx.createOscillator();_rbOsc2.frequency.value=480;_rbOsc2.connect(_rbGain);_rbOsc2.start();
-function cycle(){_rbIv=setTimeout(()=>{if(!_rbGain)return;_rbGain.gain.value=0;_rbIv=setTimeout(()=>{if(!_rbGain)return;_rbGain.gain.value=0.15;cycle()},4000)},2000)}
+function cycle(){_rbIv=setTimeout(()=>{if(!_rbGain)return;_rbGain.gain.value=0;_rbIv=setTimeout(()=>{if(!_rbGain)return;_rbGain.gain.value=0.35;cycle()},4000)},2000)}
 cycle();
 }
 function stopRingback(){
@@ -2452,10 +2456,13 @@ $('call-timer').textContent=fmtTime(elapsed);
 
 function stopCallTimer(){if(_callTimer){clearInterval(_callTimer);_callTimer=null}}
 
+function isUSNum(n){const d=n.replace(/[\s\-\(\)\.+]/g,'');const x=d.length===10&&d[0]!=='1'?'1'+d:d;return x.length===11&&x[0]==='1'&&'2345678'.includes(x[1])}
+
 function redial(num){$('dial-num').value=num;dial()}
 
 function dial(){
 const num=$('dial-num').value.trim();if(!num)return;
+if(!isUSNum(num)){alert('us numbers only');return}
 warmRingback();startRingback();
 fetch('/api/dial',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({number:num,...sipCfg()})})
 .then(r=>r.json()).then(d=>{
