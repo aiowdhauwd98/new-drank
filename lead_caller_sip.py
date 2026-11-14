@@ -7,10 +7,12 @@ deps: pip install edge-tts miniaudio
 """
 
 import argparse
+import array
 import asyncio
 import audioop
 import csv
 import hashlib
+import math
 import random
 import re
 import socket
@@ -759,60 +761,27 @@ DTMF_EVENTS = {
 
 def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
                    disconnect_evt=None, screening_flag=None, voicemail_evt=None,
-                   amd_decided_evt=None):
+                   amd_decided_evt=None, on_digit=None):
     """Background thread: receives RTP, detects RFC 4733 DTMF events.
     If audio_cb is set, forwards non-DTMF audio payloads to it.
     Sets disconnect_evt if no RTP received for 8s.
-    Sets screening_flag[0]=True if AMD detects machine.
-    Sets voicemail_evt if AMD detects machine (same signal, separate event).
-    Sets amd_decided_evt when AMD reaches any decision (human or machine)."""
-    AMD_GRACE       = 1.5    # ignore connection artifacts
-    AMD_INIT_SIL    = 4.5    # no speech at all → machine (dead air pickup)
-    AMD_VOICE_MAX   = 4.0    # accumulated voice time (not span) → machine
-    AMD_HUMAN_VOICE = 2.5    # accumulated voice under this + silence → human
-    AMD_AFTER_SIL   = 0.6    # silence after speech before deciding
-    AMD_MAX_WORDS   = 6      # word count above this → machine
-    AMD_WORD_GAP    = 0.10   # silence between words
-    AMD_MIN_WORD    = 0.12   # minimum duration to count as a word
-    AMD_WINDOW      = 7.0    # total analysis window
-    AMD_ENERGY      = 250    # RMS threshold (decoded 16-bit PCM)
+    Fires on_digit(digit) the moment a DTMF key is pressed.
+    Sets voicemail_evt when a voicemail record beep is heard — a steady tone
+    a live person never produces, so it never false-positives on a pickup."""
+    # ── voicemail beep detector (Goertzel over the 1000–1500 Hz record-tone band) ──
+    BEEP_N      = FRAME_SIZE     # 160 samples / 20 ms @ 8 kHz
+    BEEP_BINS   = range(20, 31)  # 1000–1500 Hz, 50 Hz per bin — beeps land exactly
+    BEEP_COEFFS = [2.0 * math.cos(2.0 * math.pi * k / BEEP_N) for k in BEEP_BINS]
+    BEEP_RATIO  = 0.40          # share of frame energy in one bin → pure tone
+    BEEP_RMS    = 500           # ignore near-silence
+    BEEP_HOLD   = 14            # ~280 ms of sustained tone → it's a beep
 
     seen_ts = set()
     buf = bytearray()
     last_flush = time.time()
     last_rtp_time = time.time()
-    start_time = time.time()
-
-    amd_decided = False
-    amd_in_speech = False
-    amd_first_speech = None
-    amd_last_speech = None
-    amd_cur_word_start = None
-    amd_silence_start = None
-    amd_word_count = 0
-    amd_voice_accum = 0.0
-
-    def amd_machine(reason):
-        nonlocal amd_decided
-        if amd_decided:
-            return
-        amd_decided = True
-        print(f"  [AMD] MACHINE — {reason}")
-        if screening_flag is not None:
-            screening_flag[0] = True
-        if voicemail_evt:
-            voicemail_evt.set()
-        if amd_decided_evt:
-            amd_decided_evt.set()
-
-    def amd_human(reason):
-        nonlocal amd_decided
-        if amd_decided:
-            return
-        amd_decided = True
-        print(f"  [AMD] HUMAN — {reason}")
-        if amd_decided_evt:
-            amd_decided_evt.set()
+    beep_run = 0
+    beep_done = False
 
     while not stop_evt.is_set():
         try:
@@ -845,56 +814,45 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
                 digit = DTMF_EVENTS.get(event, f"?{event}")
                 digits_list.append(digit)
                 print(f"  [DTMF] '{digit}' detected")
+                if on_digit:
+                    try: on_digit(digit)
+                    except Exception: pass
         elif len(data) > 12:
             payload = data[12:]
             now = time.time()
-            elapsed = now - start_time
 
-            if not amd_decided and elapsed < AMD_WINDOW and elapsed > AMD_GRACE:
+            if not beep_done and voicemail_evt is not None:
                 lin = audioop.ulaw2lin(payload, 2)
-                rms = audioop.rms(lin, 2)
-                is_speech = rms > AMD_ENERGY
-
-                if is_speech:
-                    amd_last_speech = now
-                    amd_silence_start = None
-                    if not amd_in_speech:
-                        amd_in_speech = True
-                        amd_cur_word_start = now
-                        if amd_first_speech is None:
-                            amd_first_speech = now
-                            if elapsed > AMD_INIT_SIL:
-                                amd_machine(f"initial silence {elapsed:.1f}s")
+                if audioop.rms(lin, 2) > BEEP_RMS:
+                    samples = array.array('h')
+                    samples.frombytes(lin)
+                    total = 0.0
+                    for s in samples:
+                        total += s * s
+                    tonal = False
+                    if total > 0:
+                        for coeff in BEEP_COEFFS:
+                            sp = sp2 = 0.0
+                            for s in samples:
+                                sp, sp2 = s + coeff * sp - sp2, sp
+                            power = sp2 * sp2 + sp * sp - coeff * sp * sp2
+                            if 2.0 * power / (BEEP_N * total) > BEEP_RATIO:
+                                tonal = True
+                                break
+                    if tonal:
+                        beep_run += 1
+                        if beep_run >= BEEP_HOLD:
+                            beep_done = True
+                            print("  [AMD] voicemail beep detected")
+                            if screening_flag is not None:
+                                screening_flag[0] = True
+                            voicemail_evt.set()
+                            if amd_decided_evt:
+                                amd_decided_evt.set()
                     else:
-                        amd_voice_accum += 0.02
-                    if amd_voice_accum > AMD_VOICE_MAX:
-                        amd_machine(f"voice {amd_voice_accum:.1f}s")
+                        beep_run = 0
                 else:
-                    if amd_in_speech:
-                        if amd_silence_start is None:
-                            amd_silence_start = now
-                        elif now - amd_silence_start > AMD_WORD_GAP:
-                            if amd_cur_word_start and now - amd_cur_word_start >= AMD_MIN_WORD:
-                                amd_word_count += 1
-                                if amd_word_count > AMD_MAX_WORDS:
-                                    amd_machine(f"{amd_word_count} words")
-                            amd_in_speech = False
-                            amd_cur_word_start = None
-                    if amd_first_speech and amd_silence_start:
-                        sil_dur = now - amd_silence_start
-                        if sil_dur > AMD_AFTER_SIL:
-                            if amd_voice_accum < AMD_HUMAN_VOICE:
-                                amd_human(f"short voice {amd_voice_accum:.1f}s + silence")
-                            else:
-                                amd_machine(f"long voice {amd_voice_accum:.1f}s + silence")
-            elif not amd_decided and elapsed >= AMD_WINDOW:
-                if amd_first_speech:
-                    if amd_voice_accum > AMD_HUMAN_VOICE:
-                        amd_machine(f"timeout with {amd_voice_accum:.1f}s voice")
-                    else:
-                        amd_human("timeout — short voice")
-                else:
-                    amd_machine("timeout — no speech detected")
+                    beep_run = 0
 
             if audio_cb:
                 buf.extend(payload)
@@ -924,7 +882,8 @@ def stream_rtp(rtp_sock, remote_addr, ulaw_data: bytes, pause_sec: int,
 
     def _should_stop():
         return ((disconnect_evt and disconnect_evt.is_set()) or
-                (stop_event and stop_event.is_set()))
+                (stop_event and stop_event.is_set()) or
+                (voicemail_evt and voicemail_evt.is_set()))
 
     pause_frames = (pause_sec * SAMPLE_RATE) // FRAME_SIZE
     print(f"  [+] sending {pause_sec}s silence ({pause_frames} frames) ...")
@@ -959,7 +918,7 @@ def stream_rtp(rtp_sock, remote_addr, ulaw_data: bytes, pause_sec: int,
     print("  [+] audio done, listening for DTMF (5s) ...")
     listen_frames = (5 * SAMPLE_RATE) // FRAME_SIZE
     for _ in range(listen_frames):
-        if (disconnect_evt and disconnect_evt.is_set()) or (stop_event and stop_event.is_set()):
+        if _should_stop():
             break
         pkt = build_rtp_packet(silence, seq, timestamp, ssrc, pt)
         rtp_sock.sendto(pkt, remote_addr)
@@ -1263,6 +1222,15 @@ def do_direct_call(server, port, username, password, caller_id, number,
                     rtp_sock.close()
                     return "cancelled"
 
+                if voicemail_evt.is_set() and not digits:
+                    print("  [direct] voicemail beep — hanging up")
+                    dtmf_stop.set()
+                    dtmf_thread.join(timeout=1)
+                    try: sip.send_bye(ctx)
+                    except Exception: pass
+                    rtp_sock.close()
+                    return "voicemail"
+
                 if disconnect_evt.is_set():
                     print("  [direct] call disconnected mid-stream")
                     dtmf_stop.set()
@@ -1401,11 +1369,12 @@ def do_direct_call(server, port, username, password, caller_id, number,
 def do_call(server, port, username, password, caller_id, number,
             ulaw_data, pause_sec, local_ip, sip_port, retries=5, retry_delay=3,
             response_ulaw=None, audio_cb=None, audio_out_cb=None, stop_event=None,
-            on_answer=None):
+            on_answer=None, on_dtmf=None):
     """Place one call with retries on flaky trunk.
     Returns 'answered', 'screening', 'disconnected', 'busy', 'declined',
-    'unavailable', 'cancelled', or False.
-    on_answer() fires the moment the call is picked up (200 OK)."""
+    'voicemail', 'unavailable', 'cancelled', or False.
+    on_answer() fires the moment the call is picked up (200 OK).
+    on_dtmf(digit) fires the moment the callee presses a key."""
     for attempt in range(1, retries + 1):
         rtp_port = random.randint(10000, 20000) & 0xFFFE
 
@@ -1438,7 +1407,8 @@ def do_call(server, port, username, password, caller_id, number,
                     kwargs={"audio_cb": audio_cb, "disconnect_evt": disconnect_evt,
                             "screening_flag": screening_flag,
                             "voicemail_evt": voicemail_evt,
-                            "amd_decided_evt": amd_decided_evt},
+                            "amd_decided_evt": amd_decided_evt,
+                            "on_digit": on_dtmf},
                     daemon=True,
                 )
                 dtmf_thread.start()
@@ -1464,6 +1434,15 @@ def do_call(server, port, username, password, caller_id, number,
                     except Exception: pass
                     rtp_sock.close()
                     return "cancelled"
+
+                if voicemail_evt.is_set() and not digits:
+                    print("  [!] voicemail beep — hanging up")
+                    dtmf_stop.set()
+                    dtmf_thread.join(timeout=1)
+                    try: sip.send_bye(ctx)
+                    except Exception: pass
+                    rtp_sock.close()
+                    return "voicemail"
 
                 if disconnect_evt.is_set():
                     print("  [!] call disconnected mid-stream")

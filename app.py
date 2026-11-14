@@ -87,8 +87,13 @@ if DATABASE_URL:
             status TEXT NOT NULL DEFAULT 'unknown',
             duration INTEGER DEFAULT 0,
             source TEXT NOT NULL DEFAULT 'dialer',
+            dtmf TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )""")
+        try:
+            c.execute("ALTER TABLE call_history ADD COLUMN IF NOT EXISTS dtmf TEXT DEFAULT ''")
+        except Exception:
+            pass
         c.commit()
         c.close()
 
@@ -121,8 +126,13 @@ else:
             status TEXT NOT NULL DEFAULT 'unknown',
             duration INTEGER DEFAULT 0,
             source TEXT NOT NULL DEFAULT 'dialer',
+            dtmf TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )""")
+        try:
+            c.execute("ALTER TABLE call_history ADD COLUMN dtmf TEXT DEFAULT ''")
+        except Exception:
+            pass
         c.commit()
         c.close()
 
@@ -661,6 +671,12 @@ def run_calls(numbers, cfg, message, response_msg, voice, pause, user_id=None):
             }
             push_event("call_start", entry)
             push_event("p1_status", {"msg": f"dialing {num} ({i+1}/{len(numbers)})..."})
+            pressed = []
+            def _on_dtmf(dig, n=num):
+                pressed.append(dig)
+                push_event("dtmf_press", {"number": n, "digit": dig,
+                                          "ts": time.strftime("%H:%M:%S")})
+                push_event("p1_status", {"msg": f"{n} — pressed {dig}"})
             result = do_call(
                 cfg["server"], cfg["port"], cfg["user"], cfg["password"],
                 cfg["caller_id"], num, ulaw, pause, local_ip,
@@ -672,7 +688,10 @@ def run_calls(numbers, cfg, message, response_msg, voice, pause, user_id=None):
                 audio_out_cb=_p1_audio_out,
                 stop_event=p1_stop_event,
                 on_answer=lambda n=num: push_event("call_answered", {"number": n}),
+                on_dtmf=_on_dtmf,
             )
+            if pressed:
+                entry["dtmf"] = "".join(pressed)
             if result == "answered":
                 entry["status"] = "answered"
                 push_event("p1_status", {"msg": f"{num} — answered"})
@@ -709,9 +728,9 @@ def run_calls(numbers, cfg, message, response_msg, voice, pause, user_id=None):
                 try:
                     c = get_db()
                     c.execute(
-                        _q("INSERT INTO call_history(user_id, number, status, source) "
-                        "VALUES(?,?,?,?)"),
-                        (user_id, num, entry["status"], "p1bot"),
+                        _q("INSERT INTO call_history(user_id, number, status, source, dtmf) "
+                        "VALUES(?,?,?,?,?)"),
+                        (user_id, num, entry["status"], "p1bot", entry.get("dtmf", "")),
                     )
                     c.commit()
                     c.close()
@@ -855,9 +874,9 @@ def run_direct_calls(numbers, cfg, message, voice, pause, trigger_digit,
                 try:
                     c = get_db()
                     c.execute(
-                        _q("INSERT INTO call_history(user_id, number, status, source) "
-                        "VALUES(?,?,?,?)"),
-                        (user_id, num, entry["status"], "p1bot"),
+                        _q("INSERT INTO call_history(user_id, number, status, source, dtmf) "
+                        "VALUES(?,?,?,?,?)"),
+                        (user_id, num, entry["status"], "p1bot", entry.get("dtmf", "")),
                     )
                     c.commit()
                     c.close()
@@ -1057,8 +1076,8 @@ def run_auto_dial_calls(numbers, cfg, max_duration, user_id=None):
                 try:
                     c = get_db()
                     c.execute(
-                        _q("INSERT INTO call_history(user_id, number, status, source) VALUES(?,?,?,?)"),
-                        (user_id, num, entry["status"], "autodial"),
+                        _q("INSERT INTO call_history(user_id, number, status, source, dtmf) VALUES(?,?,?,?,?)"),
+                        (user_id, num, entry["status"], "autodial", entry.get("dtmf", "")),
                     )
                     c.commit()
                     c.close()
@@ -1332,7 +1351,7 @@ def api_sip_status():
 def api_history():
     c = get_db()
     rows = c.execute(
-        _q("SELECT number, direction, status, source, created_at "
+        _q("SELECT number, direction, status, source, dtmf, created_at "
         "FROM call_history WHERE user_id=? ORDER BY id DESC LIMIT 50"),
         (session["uid"],),
     ).fetchall()
@@ -1910,6 +1929,18 @@ hr.dv{border:none;border-top:1px solid var(--bd);margin:16px 0}
 .bridge-toast .bt-btn:hover{border-color:var(--ac);color:var(--ac)}
 .bridge-toast .bt-answer{background:var(--ac);color:#000;border-color:var(--ac);font-weight:600}
 .bridge-toast .bt-answer:hover{filter:brightness(1.15);color:#000}
+.press-toast{position:fixed;top:20px;right:20px;z-index:10000;display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--bd);border-left:3px solid var(--dm);border-radius:8px;padding:12px 14px;box-shadow:0 8px 28px rgba(0,0,0,.5);animation:bslide .2s ease}
+.press-toast.hot{border-left-color:var(--ac);box-shadow:0 0 0 1px rgba(34,197,94,.4),0 10px 34px rgba(34,197,94,.28);animation:bslide .2s ease,ptpulse 1.1s ease infinite}
+.press-toast .pt-digit{font-size:1.5rem;font-weight:800;width:44px;height:44px;display:flex;align-items:center;justify-content:center;background:#111;border-radius:8px;color:var(--hi);font-family:'Courier New',monospace}
+.press-toast.hot .pt-digit{background:var(--ac);color:#000}
+.press-toast .pt-lbl{font-size:.62rem;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--dm)}
+.press-toast.hot .pt-lbl{color:var(--ac)}
+.press-toast .pt-num{font-size:.95rem;font-weight:700;color:var(--hi);margin-top:2px;font-family:'Courier New',monospace}
+.press-toast .pt-x{background:none;border:none;color:var(--dm);font-size:1.1rem;cursor:pointer;padding:0 0 0 4px;align-self:flex-start;line-height:1}
+.press-toast .pt-x:hover{color:var(--hi)}
+@keyframes ptpulse{0%,100%{box-shadow:0 0 0 1px rgba(34,197,94,.4),0 10px 34px rgba(34,197,94,.28)}50%{box-shadow:0 0 0 1px rgba(34,197,94,.75),0 10px 42px rgba(34,197,94,.5)}}
+.dtmf-hit{display:inline-block;min-width:18px;padding:1px 7px;border-radius:4px;background:#222;color:var(--hi);font-weight:700;font-family:'Courier New',monospace}
+.dtmf-hit.hot{background:var(--ac);color:#000}
 </style></head><body>
 <header>
 <a href="/" class="brand"><span class="brand-dot" id="brand-dot"></span>Phantom</a>
@@ -2779,7 +2810,8 @@ $('p1-empty').style.display='none';
 show.forEach(r=>{
 const tr=document.createElement('tr');
 const sc=r.status==='answered'?'s-ok':r.status==='screening'?'s-warn':r.status==='voicemail'?'s-warn':r.status==='disconnected'?'s-fail':r.status==='failed'?'s-fail':r.status==='calling'?'s-call':'s-pending';
-tr.innerHTML='<td class="num">'+r.number+'</td><td class="'+sc+'">'+r.status+'</td><td>'+(r.dtmf||'—')+'</td><td>'+(r.dur||'—')+'</td><td>'+(r.time||'—')+'</td>';
+const dt=r.dtmf?('<span class="dtmf-hit'+(r.dtmf.includes('1')?' hot':'')+'">'+r.dtmf+'</span>'):'—';
+tr.innerHTML='<td class="num">'+r.number+'</td><td class="'+sc+'">'+r.status+'</td><td>'+dt+'</td><td>'+(r.dur||'—')+'</td><td>'+(r.time||'—')+'</td>';
 tb.appendChild(tr);
 });
 }
@@ -2906,6 +2938,18 @@ src.start(agentNext);agentNext+=buf.duration;
 agentWs.onerror=function(){};
 agentWs.onclose=function(){agentWs=null;clockOutUI()};
 }
+function _pressBeep(){
+try{const c=new(window.AudioContext||window.webkitAudioContext)();const o=c.createOscillator(),g=c.createGain();o.frequency.value=880;o.connect(g);g.connect(c.destination);const t=c.currentTime;g.gain.setValueAtTime(0.0001,t);g.gain.exponentialRampToValueAtTime(0.35,t+0.02);g.gain.exponentialRampToValueAtTime(0.0001,t+0.28);o.start(t);o.stop(t+0.3);setTimeout(()=>{try{c.close()}catch(e){}},500)}catch(e){}
+}
+function showPressAlert(num,digit){
+_pressBeep();
+const hot=digit==='1';
+const el=document.createElement('div');
+el.className='press-toast'+(hot?' hot':'');
+el.innerHTML='<div class="pt-digit">'+digit+'</div><div><div class="pt-lbl">'+(hot?'pressed 1 — hot lead':'key pressed')+'</div><div class="pt-num">'+num+'</div></div><button class="pt-x" onclick="this.closest(\'.press-toast\').remove()">&times;</button>';
+document.body.appendChild(el);
+setTimeout(()=>{if(el.parentNode)el.remove()},hot?12000:5000);
+}
 function showBridgeAlert(data){
 const d=typeof data==='object'?data:{number:data};
 const num=d.number||'unknown';
@@ -2968,6 +3012,12 @@ warmRingback();startRingback();
 });
 sse.addEventListener('call_answered',e=>{
 stopRingback();
+});
+sse.addEventListener('dtmf_press',e=>{
+const d=JSON.parse(e.data);
+const row=p1Rows.find(r=>r.number===d.number&&r.status==='calling');
+if(row){row.dtmf=(row.dtmf||'')+d.digit;renderP1Table()}
+showPressAlert(d.number,d.digit);
 });
 sse.addEventListener('call_end',e=>{
 const d=JSON.parse(e.data);
@@ -3221,8 +3271,9 @@ rows.forEach(r=>{
 const d=document.createElement('div');d.className='lr';
 const c=r.status==='answered'?'s-ok':r.status==='failed'?'s-fail':'s-call';
 const src=r.source==='p1bot'?'<span style="color:var(--dm);font-size:.66rem;margin-left:4px">p1</span>':r.source==='autodial'?'<span style="color:var(--dm);font-size:.66rem;margin-left:4px">ad</span>':'';
+const dt=r.dtmf?' <span class="dtmf-hit'+(r.dtmf.includes('1')?' hot':'')+'" style="font-size:.62rem;padding:0 5px">'+r.dtmf+'</span>':'';
 const t=r.created_at?r.created_at.split(' ').pop().slice(0,5):'';
-d.innerHTML='<span><span class="n">'+r.number+'</span> <span class="'+c+'">'+r.status+'</span>'+src+'</span><span style="display:flex;align-items:center;gap:6px"><span class="m">'+t+'</span><button class="redial" data-num="'+r.number+'" title="redial">'+REDIAL_SVG+'</button></span>';
+d.innerHTML='<span><span class="n">'+r.number+'</span> <span class="'+c+'">'+r.status+'</span>'+src+dt+'</span><span style="display:flex;align-items:center;gap:6px"><span class="m">'+t+'</span><button class="redial" data-num="'+r.number+'" title="redial">'+REDIAL_SVG+'</button></span>';
 d.querySelector('.redial').onclick=function(){redial(this.dataset.num)};
 h.appendChild(d);
 });
