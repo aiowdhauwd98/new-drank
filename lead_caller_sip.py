@@ -487,9 +487,9 @@ class SIPCall:
 
         return self._handle_invite_responses(invite_ctx, sdp, rtp_sock, cancel_event=cancel_event)
 
-    def _handle_invite_responses(self, ctx, sdp, rtp_sock=None, cancel_event=None):
+    def _handle_invite_responses(self, ctx, sdp, rtp_sock=None, cancel_event=None, ring_timeout=30):
         """Read SIP responses until final (2xx/3xx/4xx/5xx/6xx) or timeout."""
-        deadline = time.time() + 60
+        deadline = time.time() + ring_timeout
         remote_rtp = None
         early_media_thread = None
         early_media_stop = threading.Event()
@@ -541,7 +541,7 @@ class SIPCall:
                 tag_m = re.search(r'tag=([^\s;]+)', to_hdr)
                 if tag_m:
                     ctx["to_tag"] = tag_m.group(1)
-                elapsed = time.time() - (deadline - 60)
+                elapsed = time.time() - (deadline - ring_timeout)
                 print(f"    [{code} at {elapsed:.1f}s] ringing/progress")
 
                 if body and rtp_sock and not early_media_thread:
@@ -914,8 +914,7 @@ def stream_rtp(rtp_sock, remote_addr, ulaw_data: bytes, pause_sec: int,
                digits_list=None, audio_cb=None, disconnect_evt=None, stop_event=None,
                voicemail_evt=None, amd_decided_evt=None):
     """Stream silence (pause) then ulaw audio as RTP packets. Returns when done.
-    If amd_decided_evt is given, keeps sending silence after pause until AMD decides.
-    If voicemail_evt fires, aborts immediately (no TTS to voicemail)."""
+    TTS always plays — AMD runs in background for reporting only."""
     ssrc = random.getrandbits(32)
     seq = random.randint(0, 0xFFFF)
     timestamp = 0
@@ -925,8 +924,7 @@ def stream_rtp(rtp_sock, remote_addr, ulaw_data: bytes, pause_sec: int,
 
     def _should_stop():
         return ((disconnect_evt and disconnect_evt.is_set()) or
-                (stop_event and stop_event.is_set()) or
-                (voicemail_evt and voicemail_evt.is_set()))
+                (stop_event and stop_event.is_set()))
 
     pause_frames = (pause_sec * SAMPLE_RATE) // FRAME_SIZE
     print(f"  [+] sending {pause_sec}s silence ({pause_frames} frames) ...")
@@ -939,21 +937,6 @@ def stream_rtp(rtp_sock, remote_addr, ulaw_data: bytes, pause_sec: int,
         seq = (seq + 1) & 0xFFFF
         timestamp += FRAME_SIZE
         time.sleep(0.02)
-
-    if amd_decided_evt and not amd_decided_evt.is_set():
-        max_wait_frames = (10 * SAMPLE_RATE) // FRAME_SIZE
-        print("  [+] waiting for AMD decision before TTS ...")
-        for _ in range(max_wait_frames):
-            if _should_stop() or amd_decided_evt.is_set():
-                break
-            pkt = build_rtp_packet(silence, seq, timestamp, ssrc, pt)
-            rtp_sock.sendto(pkt, remote_addr)
-            seq = (seq + 1) & 0xFFFF
-            timestamp += FRAME_SIZE
-            time.sleep(0.02)
-        if voicemail_evt and voicemail_evt.is_set():
-            print("  [!] voicemail detected — skipping TTS entirely")
-            return seq, timestamp, ssrc
 
     print(f"  [+] streaming audio ({len(ulaw_data) / SAMPLE_RATE:.1f}s) ...")
     offset = 0
@@ -973,10 +956,10 @@ def stream_rtp(rtp_sock, remote_addr, ulaw_data: bytes, pause_sec: int,
         offset += FRAME_SIZE
         time.sleep(0.02)
 
-    print("  [+] audio done, listening for DTMF (10s) ...")
-    listen_frames = (10 * SAMPLE_RATE) // FRAME_SIZE
+    print("  [+] audio done, listening for DTMF (5s) ...")
+    listen_frames = (5 * SAMPLE_RATE) // FRAME_SIZE
     for _ in range(listen_frames):
-        if (disconnect_evt and disconnect_evt.is_set()) or (stop_event and stop_event.is_set()) or (voicemail_evt and voicemail_evt.is_set()):
+        if (disconnect_evt and disconnect_evt.is_set()) or (stop_event and stop_event.is_set()):
             break
         pkt = build_rtp_packet(silence, seq, timestamp, ssrc, pt)
         rtp_sock.sendto(pkt, remote_addr)
@@ -1280,15 +1263,6 @@ def do_direct_call(server, port, username, password, caller_id, number,
                     rtp_sock.close()
                     return "cancelled"
 
-                if voicemail_evt.is_set():
-                    print("  [direct] voicemail detected — hanging up")
-                    dtmf_stop.set()
-                    dtmf_thread.join(timeout=1)
-                    try: sip.send_bye(ctx)
-                    except Exception: pass
-                    rtp_sock.close()
-                    return "voicemail"
-
                 if disconnect_evt.is_set():
                     print("  [direct] call disconnected mid-stream")
                     dtmf_stop.set()
@@ -1485,15 +1459,6 @@ def do_call(server, port, username, password, caller_id, number,
                     except Exception: pass
                     rtp_sock.close()
                     return "cancelled"
-
-                if voicemail_evt.is_set():
-                    print("  [!] voicemail detected — hanging up")
-                    dtmf_stop.set()
-                    dtmf_thread.join(timeout=1)
-                    try: sip.send_bye(ctx)
-                    except Exception: pass
-                    rtp_sock.close()
-                    return "voicemail"
 
                 if disconnect_evt.is_set():
                     print("  [!] call disconnected mid-stream")

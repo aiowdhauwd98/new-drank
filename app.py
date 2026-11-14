@@ -2963,9 +2963,11 @@ $('p1-start').disabled=true;$('p1-start').textContent='calling '+d.i+'/'+d.n;
 const row=p1Rows.find(r=>r.number===d.number&&r.status==='pending');
 if(row){row.status='calling';row.time=d.ts}
 updateP1Stats();renderP1Table();
+warmRingback();startRingback();
 });
 sse.addEventListener('call_end',e=>{
 const d=JSON.parse(e.data);
+stopRingback();
 if(_p1Reset)_p1Reset();
 const row=p1Rows.find(r=>r.number===d.number&&r.status==='calling');
 if(row){row.status=d.status;row.dtmf=d.dtmf||'';row.time=d.ts}
@@ -2975,6 +2977,7 @@ sse.addEventListener('agent_bridge',e=>{
 const d=JSON.parse(e.data);showBridgeAlert(d);
 });
 sse.addEventListener('batch_done',()=>{
+stopRingback();
 resetP1Buttons();loadHistory();stopP1Audio();
 $('p1-status-msg').textContent='ready';$('p1-pulse').style.display='none';
 });
