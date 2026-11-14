@@ -801,6 +801,7 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
     buf = bytearray()
     last_flush = time.time()
     last_rtp_time = time.time()
+    media_seen = False          # arm the no-RTP drop timer only after real media flows
     amd_machine = [False]       # terminal: voicemail/IVR — hang up
     amd_human   = [False]       # hint: short greeting then quiet — stop cadence, keep listening for a beep
     tone_run   = 0              # consecutive pure-tone frames
@@ -840,7 +841,7 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
                 except Exception: pass
                 buf.clear()
                 last_flush = time.time()
-            if disconnect_evt and time.time() - last_rtp_time > 8:
+            if disconnect_evt and media_seen and time.time() - last_rtp_time > 8:
                 print("  [!] no RTP for 8s — call disconnected")
                 disconnect_evt.set()
                 break
@@ -852,6 +853,7 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
         last_rtp_time = time.time()
         if len(data) < 16:
             continue
+        media_seen = True
         pt = data[1] & 0x7F
         if pt == dtmf_pt:
             ts = struct.unpack("!I", data[4:8])[0]
@@ -1460,6 +1462,8 @@ def do_call(server, port, username, password, caller_id, number,
     'voicemail', 'unavailable', 'cancelled', or False.
     on_answer() fires the moment the call is picked up (200 OK).
     on_dtmf(digit) fires the moment the callee presses a key."""
+    ANSWER_WAIT = 25                     # s to wait for a real answer before talking
+    PRE_ROLL = min(int(pause_sec), 1)    # short lead-in before the message (already waited)
     for attempt in range(1, retries + 1):
         rtp_port = random.randint(10000, 20000) & 0xFFFE
 
@@ -1498,9 +1502,45 @@ def do_call(server, port, username, password, caller_id, number,
                 )
                 dtmf_thread.start()
 
+                # ── wait for the TRUE answer before talking ──────────────────
+                # This trunk sends 200 OK at ~2 s while the phone is still ringing
+                # and streams ringback as media. The AMD only reaches a verdict on
+                # the callee's REAL audio — ringback and the gaps between rings
+                # produce none — so wait for that verdict before playing anything:
+                #   machine verdict -> hang up before the pitch is wasted,
+                #   human verdict   -> talk right after their "hello",
+                #   timeout         -> silent pickup; go ahead and play.
+                print(f"  [+] answered (early) — waiting up to {ANSWER_WAIT}s for the real connection ...")
+                amd_decided_evt.wait(timeout=ANSWER_WAIT)
+
+                if stop_event and stop_event.is_set():
+                    print("  [!] cancelled while waiting for answer")
+                    dtmf_stop.set(); dtmf_thread.join(timeout=1)
+                    try: sip.send_bye(ctx)
+                    except Exception: pass
+                    rtp_sock.close()
+                    return "cancelled"
+
+                if voicemail_evt.is_set() and not digits:
+                    print("  [!] voicemail/machine — hanging up before the message")
+                    dtmf_stop.set(); dtmf_thread.join(timeout=1)
+                    try: sip.send_bye(ctx)
+                    except Exception: pass
+                    rtp_sock.close()
+                    return "voicemail"
+
+                if disconnect_evt.is_set():
+                    print("  [!] disconnected before answer")
+                    dtmf_stop.set(); dtmf_thread.join(timeout=1)
+                    try: sip.send_bye(ctx)
+                    except Exception: pass
+                    rtp_sock.close()
+                    return "disconnected"
+
                 if ulaw_data:
+                    print("  [+] connection live — playing message")
                     rtp_state = stream_rtp(rtp_sock, remote_rtp, ulaw_data,
-                                           pause_sec, digits_list=digits,
+                                           PRE_ROLL, digits_list=digits,
                                            audio_cb=audio_out_cb,
                                            disconnect_evt=disconnect_evt,
                                            stop_event=stop_event,
