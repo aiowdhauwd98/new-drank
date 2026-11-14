@@ -768,9 +768,9 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
     Sets amd_decided_evt when AMD reaches any decision (human or machine)."""
     AMD_GRACE       = 1.5    # ignore connection artifacts
     AMD_INIT_SIL    = 4.5    # no speech at all → machine (dead air pickup)
-    AMD_VOICE_MAX   = 3.0    # accumulated voice time (not span) → machine
-    AMD_HUMAN_VOICE = 1.5    # accumulated voice under this + silence → human
-    AMD_AFTER_SIL   = 1.5    # silence after speech before deciding
+    AMD_VOICE_MAX   = 4.0    # accumulated voice time (not span) → machine
+    AMD_HUMAN_VOICE = 2.5    # accumulated voice under this + silence → human
+    AMD_AFTER_SIL   = 0.6    # silence after speech before deciding
     AMD_MAX_WORDS   = 6      # word count above this → machine
     AMD_WORD_GAP    = 0.10   # silence between words
     AMD_MIN_WORD    = 0.12   # minimum duration to count as a word
