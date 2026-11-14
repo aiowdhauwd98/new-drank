@@ -792,9 +792,10 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
     MIN_WORD_MS   = 100                             # voiced runs shorter than this aren't words
     BTW_WORD_MS   = 60                              # silence shorter than this doesn't end a word
     MAX_WORDS     = 5                               # more than this many words ⇒ machine (lenient)
-    INIT_SIL_MS   = 3500                            # dead air before any speech ⇒ machine (backstop)
     CADENCE_MS    = 6000                            # cadence rules stop judging after this
     TONE_WINDOW_MS = 12000                          # beep/SIT still catchable this long in
+    RB_COEFF_440 = 2.0 * math.cos(2.0 * math.pi * 440.0 / SAMPLE_RATE)  # US ringback is a
+    RB_COEFF_480 = 2.0 * math.cos(2.0 * math.pi * 480.0 / SAMPLE_RATE)  # 440+480 Hz dual tone
 
     seen_ts = set()
     buf = bytearray()
@@ -803,6 +804,7 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
     amd_machine = [False]       # terminal: voicemail/IVR — hang up
     amd_human   = [False]       # hint: short greeting then quiet — stop cadence, keep listening for a beep
     tone_run   = 0              # consecutive pure-tone frames
+    tone_hz    = [0]            # frequency of the most recent tonal frame (diagnostic)
     voice_ms   = 0              # length of the current unbroken voiced run
     sil_ms     = 0              # length of the current unbroken silence run
     word_count = 0              # voiced segments seen so far
@@ -813,12 +815,21 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
         if amd_machine[0]:
             return
         amd_machine[0] = True
-        print("  [AMD] machine detected — " + reason)
+        print("  [AMD] machine — %s  [voice=%dms sil=%dms words=%d tone=%d t=%dms]"
+              % (reason, voice_ms, sil_ms, word_count, tone_run, total_ms), flush=True)
         if screening_flag is not None:
             screening_flag[0] = True
         voicemail_evt.set()
         if amd_decided_evt:
             amd_decided_evt.set()
+
+    def _tone_ratio(samples, coeff, energy):
+        # Goertzel: share of frame energy at the frequency `coeff` encodes (0..1)
+        sp = sp2 = 0.0
+        for s in samples:
+            sp, sp2 = s + coeff * sp - sp2, sp
+        power = sp2 * sp2 + sp * sp - coeff * sp * sp2
+        return 2.0 * power / (TONE_N * energy)
 
     while not stop_evt.is_set():
         try:
@@ -861,61 +872,72 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
             if voicemail_evt is not None and not amd_machine[0] and total_ms <= TONE_WINDOW_MS:
                 lin = audioop.ulaw2lin(payload, 2)
                 rms = audioop.rms(lin, 2)
-                total_ms += MS_PER_FRAME
                 voiced = rms > SILENCE_RMS
 
-                # (1) machine tone — a sustained pure tone in the beep/SIT band.
-                #     Stays active even after a human hint, to catch a late beep.
+                ringback = False
+                tonal = False
                 if voiced:
                     samples = array.array('h')
                     samples.frombytes(lin)
                     energy = 0.0
                     for s in samples:
                         energy += s * s
-                    tonal = False
                     if energy > 0:
-                        for coeff in TONE_COEFFS:
-                            sp = sp2 = 0.0
-                            for s in samples:
-                                sp, sp2 = s + coeff * sp - sp2, sp
-                            power = sp2 * sp2 + sp * sp - coeff * sp * sp2
-                            if 2.0 * power / (TONE_N * energy) > TONE_RATIO:
-                                tonal = True
-                                break
+                        # Ignore US ringback (440+480 Hz): the carrier streams it as
+                        # media for up to ~2 s AFTER the 200 OK, and it is not the
+                        # callee — counting it was flagging every live pickup.
+                        if (_tone_ratio(samples, RB_COEFF_440, energy) > 0.15 and
+                                _tone_ratio(samples, RB_COEFF_480, energy) > 0.15):
+                            ringback = True
+                        else:
+                            # beep / SIT: a single pure tone in the 900–1900 Hz band
+                            for bi, coeff in enumerate(TONE_COEFFS):
+                                if _tone_ratio(samples, coeff, energy) > TONE_RATIO:
+                                    tonal = True
+                                    tone_hz[0] = (18 + bi) * (SAMPLE_RATE // TONE_N)
+                                    break
+
+                if ringback:
+                    # still ringing — real media hasn't begun; reset and keep waiting
+                    tone_run = 0
+                    voice_ms = 0
+                    sil_ms = 0
+                    in_word = False
+                else:
+                    total_ms += MS_PER_FRAME
+
+                    # (1) machine tone — beep / SIT. Stays active after a human hint.
                     if tonal:
                         tone_run += 1
                         if tone_run >= TONE_HOLD:
-                            _amd_flag_machine("sustained tone (voicemail beep / carrier SIT)")
+                            _amd_flag_machine("sustained %d Hz tone (beep/SIT)" % tone_hz[0])
                     else:
                         tone_run = 0
-                else:
-                    tone_run = 0
 
-                # (2)+(3) speech cadence — voiced runs vs. silence (Asterisk AMD).
-                #         Stops once a human/machine verdict is reached or the window ends.
-                if not amd_human[0] and not amd_machine[0] and total_ms <= CADENCE_MS:
-                    if voiced:
-                        voice_ms += MS_PER_FRAME
-                        sil_ms = 0
-                        if not in_word and voice_ms >= MIN_WORD_MS:
-                            in_word = True
-                            word_count += 1
-                        if voice_ms >= GREETING_MS:
-                            _amd_flag_machine("continuous greeting %d ms" % voice_ms)
-                        elif word_count > MAX_WORDS:
-                            _amd_flag_machine("%d words" % word_count)
-                    else:
-                        sil_ms += MS_PER_FRAME
-                        if in_word and sil_ms >= BTW_WORD_MS:
-                            in_word = False
-                            voice_ms = 0
-                        if word_count == 0 and sil_ms >= INIT_SIL_MS:
-                            _amd_flag_machine("%d ms dead air before any speech" % sil_ms)
-                        elif word_count >= 1 and sil_ms >= AFTER_SIL_MS:
-                            amd_human[0] = True
-                            print("  [AMD] human — short greeting then pause")
-                            if amd_decided_evt:
-                                amd_decided_evt.set()
+                    # (2)+(3) speech cadence — voiced runs vs. silence (Asterisk AMD).
+                    #         Stops once a human/machine verdict is reached.
+                    if not amd_human[0] and not amd_machine[0] and total_ms <= CADENCE_MS:
+                        if voiced:
+                            voice_ms += MS_PER_FRAME
+                            sil_ms = 0
+                            if not in_word and voice_ms >= MIN_WORD_MS:
+                                in_word = True
+                                word_count += 1
+                            if voice_ms >= GREETING_MS:
+                                _amd_flag_machine("continuous greeting %d ms" % voice_ms)
+                            elif word_count > MAX_WORDS:
+                                _amd_flag_machine("%d words" % word_count)
+                        else:
+                            sil_ms += MS_PER_FRAME
+                            if in_word and sil_ms >= BTW_WORD_MS:
+                                in_word = False
+                                voice_ms = 0
+                            if word_count >= 1 and sil_ms >= AFTER_SIL_MS:
+                                amd_human[0] = True
+                                print("  [AMD] human — short greeting then pause  [words=%d t=%dms]"
+                                      % (word_count, total_ms), flush=True)
+                                if amd_decided_evt:
+                                    amd_decided_evt.set()
 
             if audio_cb:
                 buf.extend(payload)
