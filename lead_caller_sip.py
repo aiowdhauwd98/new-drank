@@ -766,22 +766,59 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
     If audio_cb is set, forwards non-DTMF audio payloads to it.
     Sets disconnect_evt if no RTP received for 8s.
     Fires on_digit(digit) the moment a DTMF key is pressed.
-    Sets voicemail_evt when a voicemail record beep is heard — a steady tone
-    a live person never produces, so it never false-positives on a pickup."""
-    # ── voicemail beep detector (Goertzel over the 1000–1500 Hz record-tone band) ──
-    BEEP_N      = FRAME_SIZE     # 160 samples / 20 ms @ 8 kHz
-    BEEP_BINS   = range(20, 31)  # 1000–1500 Hz, 50 Hz per bin — beeps land exactly
-    BEEP_COEFFS = [2.0 * math.cos(2.0 * math.pi * k / BEEP_N) for k in BEEP_BINS]
-    BEEP_RATIO  = 0.40          # share of frame energy in one bin → pure tone
-    BEEP_RMS    = 500           # ignore near-silence
-    BEEP_HOLD   = 14            # ~280 ms of sustained tone → it's a beep
+    Sets voicemail_evt when the callee is an answering machine / IVR — a record
+    beep, a carrier SIT tone, or a continuous recorded greeting. A short human
+    "hello?" followed by a pause is left alone, so a live person is never cut."""
+    # ── answering-machine detection (runs on the callee's inbound RTP) ────────────
+    # Three independent machine signals — any one ⇒ voicemail/IVR; silence keeps the
+    # call HUMAN, so a live person is never cut. Decides inside the first few seconds
+    # (the pause window before TTS), the same window a person uses to say "hello?".
+    #   1. machine tone  — a sustained pure tone 900–1900 Hz: a voicemail record beep
+    #                      OR a carrier SIT ("I'm sorry, the number you have called…").
+    #   2. long greeting — one unbroken voiced stretch >1.5 s: a recording, never a
+    #                      human's short "hello?". Catches custom/standard greetings.
+    #   3. cadence       — Asterisk-AMD backstops: long dead air, or too many words.
+    # Tone detection keeps running after a human hint, so a short "Hi!———[beep]"
+    # greeting that first looks human still flips to voicemail on the beep.
+    TONE_N      = FRAME_SIZE                        # 160 samples / 20 ms, 50 Hz per bin
+    TONE_BINS   = range(18, 39)                     # 900–1900 Hz: beep band + SIT segments
+    TONE_COEFFS = [2.0 * math.cos(2.0 * math.pi * k / TONE_N) for k in TONE_BINS]
+    TONE_RATIO  = 0.40                              # >40% of a frame's energy in one bin ⇒ pure tone
+    TONE_HOLD   = 12                                # ~240 ms sustained ⇒ tone (speech cannot hold this)
+    SILENCE_RMS = 300                               # 16-bit RMS below this ⇒ silence
+    MS_PER_FRAME  = 1000 * FRAME_SIZE // SAMPLE_RATE  # = 20 ms
+    GREETING_MS   = 1500                            # one continuous voiced run this long ⇒ machine
+    AFTER_SIL_MS  = 800                             # a word then this much quiet ⇒ human hint
+    MIN_WORD_MS   = 100                             # voiced runs shorter than this aren't words
+    BTW_WORD_MS   = 60                              # silence shorter than this doesn't end a word
+    MAX_WORDS     = 5                               # more than this many words ⇒ machine (lenient)
+    INIT_SIL_MS   = 3500                            # dead air before any speech ⇒ machine (backstop)
+    CADENCE_MS    = 6000                            # cadence rules stop judging after this
+    TONE_WINDOW_MS = 12000                          # beep/SIT still catchable this long in
 
     seen_ts = set()
     buf = bytearray()
     last_flush = time.time()
     last_rtp_time = time.time()
-    beep_run = 0
-    beep_done = False
+    amd_machine = [False]       # terminal: voicemail/IVR — hang up
+    amd_human   = [False]       # hint: short greeting then quiet — stop cadence, keep listening for a beep
+    tone_run   = 0              # consecutive pure-tone frames
+    voice_ms   = 0              # length of the current unbroken voiced run
+    sil_ms     = 0              # length of the current unbroken silence run
+    word_count = 0              # voiced segments seen so far
+    in_word    = False
+    total_ms   = 0              # total audio analysed
+
+    def _amd_flag_machine(reason):
+        if amd_machine[0]:
+            return
+        amd_machine[0] = True
+        print("  [AMD] machine detected — " + reason)
+        if screening_flag is not None:
+            screening_flag[0] = True
+        voicemail_evt.set()
+        if amd_decided_evt:
+            amd_decided_evt.set()
 
     while not stop_evt.is_set():
         try:
@@ -821,38 +858,64 @@ def dtmf_listener(rtp_sock, stop_evt, digits_list, dtmf_pt=101, audio_cb=None,
             payload = data[12:]
             now = time.time()
 
-            if not beep_done and voicemail_evt is not None:
+            if voicemail_evt is not None and not amd_machine[0] and total_ms <= TONE_WINDOW_MS:
                 lin = audioop.ulaw2lin(payload, 2)
-                if audioop.rms(lin, 2) > BEEP_RMS:
+                rms = audioop.rms(lin, 2)
+                total_ms += MS_PER_FRAME
+                voiced = rms > SILENCE_RMS
+
+                # (1) machine tone — a sustained pure tone in the beep/SIT band.
+                #     Stays active even after a human hint, to catch a late beep.
+                if voiced:
                     samples = array.array('h')
                     samples.frombytes(lin)
-                    total = 0.0
+                    energy = 0.0
                     for s in samples:
-                        total += s * s
+                        energy += s * s
                     tonal = False
-                    if total > 0:
-                        for coeff in BEEP_COEFFS:
+                    if energy > 0:
+                        for coeff in TONE_COEFFS:
                             sp = sp2 = 0.0
                             for s in samples:
                                 sp, sp2 = s + coeff * sp - sp2, sp
                             power = sp2 * sp2 + sp * sp - coeff * sp * sp2
-                            if 2.0 * power / (BEEP_N * total) > BEEP_RATIO:
+                            if 2.0 * power / (TONE_N * energy) > TONE_RATIO:
                                 tonal = True
                                 break
                     if tonal:
-                        beep_run += 1
-                        if beep_run >= BEEP_HOLD:
-                            beep_done = True
-                            print("  [AMD] voicemail beep detected")
-                            if screening_flag is not None:
-                                screening_flag[0] = True
-                            voicemail_evt.set()
+                        tone_run += 1
+                        if tone_run >= TONE_HOLD:
+                            _amd_flag_machine("sustained tone (voicemail beep / carrier SIT)")
+                    else:
+                        tone_run = 0
+                else:
+                    tone_run = 0
+
+                # (2)+(3) speech cadence — voiced runs vs. silence (Asterisk AMD).
+                #         Stops once a human/machine verdict is reached or the window ends.
+                if not amd_human[0] and not amd_machine[0] and total_ms <= CADENCE_MS:
+                    if voiced:
+                        voice_ms += MS_PER_FRAME
+                        sil_ms = 0
+                        if not in_word and voice_ms >= MIN_WORD_MS:
+                            in_word = True
+                            word_count += 1
+                        if voice_ms >= GREETING_MS:
+                            _amd_flag_machine("continuous greeting %d ms" % voice_ms)
+                        elif word_count > MAX_WORDS:
+                            _amd_flag_machine("%d words" % word_count)
+                    else:
+                        sil_ms += MS_PER_FRAME
+                        if in_word and sil_ms >= BTW_WORD_MS:
+                            in_word = False
+                            voice_ms = 0
+                        if word_count == 0 and sil_ms >= INIT_SIL_MS:
+                            _amd_flag_machine("%d ms dead air before any speech" % sil_ms)
+                        elif word_count >= 1 and sil_ms >= AFTER_SIL_MS:
+                            amd_human[0] = True
+                            print("  [AMD] human — short greeting then pause")
                             if amd_decided_evt:
                                 amd_decided_evt.set()
-                    else:
-                        beep_run = 0
-                else:
-                    beep_run = 0
 
             if audio_cb:
                 buf.extend(payload)
@@ -1223,7 +1286,7 @@ def do_direct_call(server, port, username, password, caller_id, number,
                     return "cancelled"
 
                 if voicemail_evt.is_set() and not digits:
-                    print("  [direct] voicemail beep — hanging up")
+                    print("  [direct] voicemail/machine — hanging up")
                     dtmf_stop.set()
                     dtmf_thread.join(timeout=1)
                     try: sip.send_bye(ctx)
@@ -1436,7 +1499,7 @@ def do_call(server, port, username, password, caller_id, number,
                     return "cancelled"
 
                 if voicemail_evt.is_set() and not digits:
-                    print("  [!] voicemail beep — hanging up")
+                    print("  [!] voicemail/machine — hanging up")
                     dtmf_stop.set()
                     dtmf_thread.join(timeout=1)
                     try: sip.send_bye(ctx)
