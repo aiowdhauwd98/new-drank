@@ -1231,7 +1231,7 @@ def api_call():
     raw = d.get("numbers", "").strip()
     if not raw:
         return jsonify(error="no numbers"), 400
-    nums = [normalize_number(n.strip()) for n in raw.splitlines() if n.strip()]
+    nums = [normalize_number(n.strip()) for n in raw.replace(",", "\n").splitlines() if n.strip()]
     nums = [n for n in nums if is_us_number(n)]
     if not nums:
         return jsonify(error="no valid us numbers"), 400
