@@ -1929,18 +1929,17 @@ hr.dv{border:none;border-top:1px solid var(--bd);margin:16px 0}
 .bridge-toast .bt-btn:hover{border-color:var(--ac);color:var(--ac)}
 .bridge-toast .bt-answer{background:var(--ac);color:#000;border-color:var(--ac);font-weight:600}
 .bridge-toast .bt-answer:hover{filter:brightness(1.15);color:#000}
-.press-toast{position:fixed;top:20px;right:20px;z-index:10000;display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--bd);border-left:3px solid var(--dm);border-radius:8px;padding:12px 14px;box-shadow:0 8px 28px rgba(0,0,0,.5);animation:bslide .2s ease}
-.press-toast.hot{border-left-color:var(--ac);box-shadow:0 0 0 1px rgba(34,197,94,.4),0 10px 34px rgba(34,197,94,.28);animation:bslide .2s ease,ptpulse 1.1s ease infinite}
-.press-toast .pt-digit{font-size:1.5rem;font-weight:800;width:44px;height:44px;display:flex;align-items:center;justify-content:center;background:#111;border-radius:8px;color:var(--hi);font-family:'Courier New',monospace}
-.press-toast.hot .pt-digit{background:var(--ac);color:#000}
-.press-toast .pt-lbl{font-size:.62rem;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--dm)}
+.press-toast{position:fixed;top:16px;right:16px;z-index:10000;display:flex;align-items:center;gap:11px;background:var(--card);border:1px solid var(--bd);border-radius:7px;padding:11px 13px;min-width:206px;box-shadow:0 10px 30px rgba(0,0,0,.55);animation:bslide .2s ease}
+.press-toast.hot{border-color:rgba(34,197,94,.3)}
+.press-toast .pt-digit{font-size:.88rem;font-weight:700;width:28px;height:28px;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:var(--sf);border:1px solid var(--bd);border-radius:5px;color:var(--tx);font-family:'Courier New',monospace}
+.press-toast.hot .pt-digit{background:var(--acb);border-color:rgba(34,197,94,.35);color:var(--ac)}
+.press-toast .pt-lbl{font-size:.58rem;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--tx)}
 .press-toast.hot .pt-lbl{color:var(--ac)}
-.press-toast .pt-num{font-size:.95rem;font-weight:700;color:var(--hi);margin-top:2px;font-family:'Courier New',monospace}
-.press-toast .pt-x{background:none;border:none;color:var(--dm);font-size:1.1rem;cursor:pointer;padding:0 0 0 4px;align-self:flex-start;line-height:1}
+.press-toast .pt-num{font-size:.86rem;font-weight:600;color:var(--hi);margin-top:3px;font-family:'Courier New',monospace;letter-spacing:.3px}
+.press-toast .pt-x{background:none;border:none;color:var(--dm);font-size:1rem;cursor:pointer;padding:0 0 0 6px;align-self:flex-start;line-height:1;transition:color .15s}
 .press-toast .pt-x:hover{color:var(--hi)}
-@keyframes ptpulse{0%,100%{box-shadow:0 0 0 1px rgba(34,197,94,.4),0 10px 34px rgba(34,197,94,.28)}50%{box-shadow:0 0 0 1px rgba(34,197,94,.75),0 10px 42px rgba(34,197,94,.5)}}
-.dtmf-hit{display:inline-block;min-width:18px;padding:1px 7px;border-radius:4px;background:#222;color:var(--hi);font-weight:700;font-family:'Courier New',monospace}
-.dtmf-hit.hot{background:var(--ac);color:#000}
+.dtmf-hit{display:inline-block;min-width:16px;padding:1px 6px;border-radius:4px;background:var(--sf);border:1px solid var(--bd);color:var(--hi);font-weight:600;font-family:'Courier New',monospace}
+.dtmf-hit.hot{background:var(--acb);border-color:rgba(34,197,94,.35);color:var(--ac)}
 </style></head><body>
 <header>
 <a href="/" class="brand"><span class="brand-dot" id="brand-dot"></span>Phantom</a>
@@ -2946,7 +2945,7 @@ _pressBeep();
 const hot=digit==='1';
 const el=document.createElement('div');
 el.className='press-toast'+(hot?' hot':'');
-el.innerHTML='<div class="pt-digit">'+digit+'</div><div><div class="pt-lbl">'+(hot?'pressed 1 — hot lead':'key pressed')+'</div><div class="pt-num">'+num+'</div></div><button class="pt-x" onclick="this.closest(\'.press-toast\').remove()">&times;</button>';
+el.innerHTML=`<div class="pt-digit">${digit}</div><div><div class="pt-lbl">${hot?'responder':'key pressed'}</div><div class="pt-num">${num}</div></div><button class="pt-x" onclick="this.closest('.press-toast').remove()">&times;</button>`;
 document.body.appendChild(el);
 setTimeout(()=>{if(el.parentNode)el.remove()},hot?12000:5000);
 }
