@@ -671,6 +671,7 @@ def run_calls(numbers, cfg, message, response_msg, voice, pause, user_id=None):
                 audio_cb=_p1_audio_in,
                 audio_out_cb=_p1_audio_out,
                 stop_event=p1_stop_event,
+                on_answer=lambda n=num: push_event("call_answered", {"number": n}),
             )
             if result == "answered":
                 entry["status"] = "answered"
@@ -2964,6 +2965,9 @@ const row=p1Rows.find(r=>r.number===d.number&&r.status==='pending');
 if(row){row.status='calling';row.time=d.ts}
 updateP1Stats();renderP1Table();
 warmRingback();startRingback();
+});
+sse.addEventListener('call_answered',e=>{
+stopRingback();
 });
 sse.addEventListener('call_end',e=>{
 const d=JSON.parse(e.data);

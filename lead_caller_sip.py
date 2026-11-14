@@ -1400,10 +1400,12 @@ def do_direct_call(server, port, username, password, caller_id, number,
 
 def do_call(server, port, username, password, caller_id, number,
             ulaw_data, pause_sec, local_ip, sip_port, retries=5, retry_delay=3,
-            response_ulaw=None, audio_cb=None, audio_out_cb=None, stop_event=None):
+            response_ulaw=None, audio_cb=None, audio_out_cb=None, stop_event=None,
+            on_answer=None):
     """Place one call with retries on flaky trunk.
     Returns 'answered', 'screening', 'disconnected', 'busy', 'declined',
-    'unavailable', 'cancelled', or False."""
+    'unavailable', 'cancelled', or False.
+    on_answer() fires the moment the call is picked up (200 OK)."""
     for attempt in range(1, retries + 1):
         rtp_port = random.randint(10000, 20000) & 0xFFFE
 
@@ -1421,6 +1423,9 @@ def do_call(server, port, username, password, caller_id, number,
                 return "cancelled"
 
             if code == 200 and remote_rtp:
+                if on_answer:
+                    try: on_answer()
+                    except Exception: pass
                 digits = []
                 disconnect_evt = threading.Event()
                 voicemail_evt = threading.Event()
