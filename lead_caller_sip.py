@@ -316,7 +316,7 @@ class SIPCall:
             resp += f"CSeq: {cseq}" + CRLF
             resp += f"Allow: {ALLOW}" + CRLF
             resp += f"Supported: {SUPPORTED}" + CRLF
-            resp += f"User-Agent: Phantom/1.0.0" + CRLF
+            resp += f"User-Agent: Spoof/1.0.0" + CRLF
             resp += "Content-Length:  0" + CRLF + CRLF
 
             self.sock.sendto(resp.encode(), addr)
@@ -355,7 +355,7 @@ class SIPCall:
         reg += f'To: "{self.caller_id}" <sip:{self.username}@{self.server}>' + CRLF
         reg += f"Call-ID: {call_id}" + CRLF
         reg += f"CSeq: {cseq} REGISTER" + CRLF
-        reg += f"User-Agent: Phantom/1.0.0" + CRLF
+        reg += f"User-Agent: Spoof/1.0.0" + CRLF
         reg += f'Contact: "{self.caller_id}" <sip:{self.username}@{self.local_ip}:{self.local_port};ob>' + CRLF
         reg += "Expires: 300" + CRLF
         reg += f"Allow: {ALLOW}" + CRLF
@@ -407,7 +407,7 @@ class SIPCall:
             reg2 += f'To: "{self.caller_id}" <sip:{self.username}@{self.server}>' + CRLF
             reg2 += f"Call-ID: {call_id}" + CRLF
             reg2 += f"CSeq: {cseq2} REGISTER" + CRLF
-            reg2 += f"User-Agent: Phantom/1.0.0" + CRLF
+            reg2 += f"User-Agent: Spoof/1.0.0" + CRLF
             reg2 += f'Contact: "{self.caller_id}" <sip:{self.username}@{self.local_ip}:{self.local_port};ob>' + CRLF
             reg2 += "Expires: 300" + CRLF
             reg2 += f"Allow: {ALLOW}" + CRLF
@@ -463,7 +463,7 @@ class SIPCall:
         inv += f"Supported: {SUPPORTED}" + CRLF
         inv += "Session-Expires: 1800" + CRLF
         inv += "Min-SE: 90" + CRLF
-        inv += "User-Agent: Phantom/1.0.0" + CRLF
+        inv += "User-Agent: Spoof/1.0.0" + CRLF
         inv += "Content-Type: application/sdp" + CRLF
         inv += f"Content-Length:   {len(sdp)}" + CRLF + CRLF
         inv += sdp
@@ -628,7 +628,7 @@ class SIPCall:
                 inv2 += f"Supported: {SUPPORTED}" + CRLF
                 inv2 += "Session-Expires: 1800" + CRLF
                 inv2 += "Min-SE: 90" + CRLF
-                inv2 += "User-Agent: Phantom/1.0.0" + CRLF
+                inv2 += "User-Agent: Spoof/1.0.0" + CRLF
                 inv2 += f"{auth_header_name}: {auth_value}" + CRLF
                 inv2 += "Content-Type: application/sdp" + CRLF
                 inv2 += f"Content-Length:   {len(sdp2)}" + CRLF + CRLF
@@ -682,7 +682,7 @@ class SIPCall:
         cancel += f'To: <sip:{ctx["number"]}@{self.server}>' + CRLF
         cancel += f'Call-ID: {ctx["call_id"]}' + CRLF
         cancel += f'CSeq: {ctx["cseq"]} CANCEL' + CRLF
-        cancel += "User-Agent: Phantom/1.0.0" + CRLF
+        cancel += "User-Agent: Spoof/1.0.0" + CRLF
         cancel += "Content-Length:  0" + CRLF + CRLF
         self._send(cancel)
         # drain the 200/487 responses
@@ -717,7 +717,7 @@ class SIPCall:
         ack += f'Call-ID: {ctx["call_id"]}' + CRLF
         ack += f'CSeq: {ctx["cseq"]} ACK' + CRLF
         ack += f'Contact: "{self.caller_id}" <sip:{self.username}@{self.local_ip}:{self.local_port};ob>' + CRLF
-        ack += "User-Agent: Phantom/1.0.0" + CRLF
+        ack += "User-Agent: Spoof/1.0.0" + CRLF
         ack += "Content-Length:  0" + CRLF + CRLF
         self._send(ack)
 
@@ -734,7 +734,7 @@ class SIPCall:
         bye += f'Call-ID: {ctx["call_id"]}' + CRLF
         bye += f"CSeq: {cseq} BYE" + CRLF
         bye += f'Contact: "{self.caller_id}" <sip:{self.username}@{self.local_ip}:{self.local_port};ob>' + CRLF
-        bye += "User-Agent: Phantom/1.0.0" + CRLF
+        bye += "User-Agent: Spoof/1.0.0" + CRLF
         bye += "Content-Length:  0" + CRLF + CRLF
 
         self._send(bye)

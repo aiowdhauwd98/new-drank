@@ -1,5 +1,5 @@
 """
-app.py — Phantom
+app.py — Spoof
 SIP dialer with accounts, live audio, and P1 Bot batch calling.
 """
 
@@ -33,6 +33,10 @@ from lead_caller_sip import (
 
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "ph4nt0m-d3v-s3cr3t")
+
+# Invite codes required to sign up (comma-separated in the INVITE_CODES env var).
+# An empty set disables the gate; set at least one code to require it.
+INVITE_CODES = {c.strip() for c in os.getenv("INVITE_CODES", "SPOOF-2026").split(",") if c.strip()}
 sock = Sock(app)
 
 
@@ -1152,8 +1156,11 @@ def register():
         u = request.form.get("username", "").strip()
         p = request.form.get("password", "")
         p2 = request.form.get("confirm", "")
+        inv = request.form.get("invite", "").strip()
         if not u or not p:
             err = "all fields required"
+        elif INVITE_CODES and inv not in INVITE_CODES:
+            err = "invalid invite code"
         elif len(u) < 3:
             err = "username too short"
         elif len(p) < 6:
@@ -1622,7 +1629,7 @@ def _notify_agent_bridge(info):
 AUTH_HTML = """<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Phantom</title>
+<title>Spoof</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='8' fill='%2322c55e'/%3E%3C/svg%3E">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
@@ -1651,12 +1658,13 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--tx);min-hei
 .ver{font-size:.6rem;color:#2a2a2a;text-align:center;margin-top:32px;letter-spacing:.08em}
 </style></head><body>
 <div class="a">
-<div class="br">Phantom</div>
+<div class="br">Spoof</div>
 {% if error %}<div class="err">{{ error }}</div>{% endif %}
 <form method="POST">
 <div class="f"><label>username</label><input name="username" autocomplete="username" required></div>
 <div class="f"><label>password</label><input name="password" type="password" autocomplete="{% if mode == 'register' %}new-password{% else %}current-password{% endif %}" required></div>
 {% if mode == 'register' %}<div class="f"><label>confirm password</label><input name="confirm" type="password" autocomplete="new-password" required></div>{% endif %}
+{% if mode == 'register' %}<div class="f"><label>invite code</label><input name="invite" autocomplete="off" spellcheck="false" required></div>{% endif %}
 <button class="btn" type="submit">{% if mode == 'register' %}create account{% else %}sign in{% endif %}</button>
 </form>
 <div class="alt">{% if mode == 'register' %}have an account? <a href="/login">sign in</a>{% else %}no account? <a href="/register">register</a>{% endif %}</div>
@@ -1668,7 +1676,7 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--tx);min-hei
 DASH_HTML = """<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Phantom</title>
+<title>Spoof</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='8' fill='%2322c55e'/%3E%3C/svg%3E">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -1942,7 +1950,7 @@ hr.dv{border:none;border-top:1px solid var(--bd);margin:16px 0}
 .dtmf-hit.hot{background:var(--acb);border-color:rgba(34,197,94,.35);color:var(--ac)}
 </style></head><body>
 <header>
-<a href="/" class="brand"><span class="brand-dot" id="brand-dot"></span>Phantom</a>
+<a href="/" class="brand"><span class="brand-dot" id="brand-dot"></span>Spoof</a>
 <div class="ub"><span class="nm">{{ uname }}</span><a href="/logout">sign out</a><button class="gear" onclick="showSettings()" title="settings"><svg viewBox="0 0 24 24" fill="none" stroke="#444" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button></div>
 </header>
 
@@ -2337,7 +2345,7 @@ hr.dv{border:none;border-top:1px solid var(--bd);margin:16px 0}
 
 </div>
 
-<div class="footer">phantom v1.0</div>
+<div class="footer">spoof v1.0</div>
 
 <script>
 const $=id=>document.getElementById(id);
